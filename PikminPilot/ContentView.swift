@@ -684,7 +684,7 @@ struct ContentView: View {
     private func startStage101Auto() async {
         guard let url = pairing.pairingURL else { return }
         busy = true
-        status = "STAGE 11.3.0 START • \(runSummaryLabel) • integrated tunnel → RSD → DDI preflight → Runner → stable 10.3.1 loop"
+        status = "STAGE 11.3.1 START • \(runSummaryLabel) • integrated tunnel → RSD → DDI preflight → Runner → stable 10.3.1 loop"
 
         var tunnelNote = "integrated=not-attempted"
         do {
@@ -706,21 +706,21 @@ struct ContentView: View {
             return
         }
 
-        status = "STAGE 11.3.0 PREFLIGHT • RSD ✅ • checking developer services…"
+        status = "STAGE 11.3.1 PREFLIGHT • RSD ✅ • checking developer services…"
         var services = await engine.probeXCTestServices()
         if !services.ok {
-            status = "STAGE 11.3.0 PREFLIGHT • developer services missing after reboot • preparing Personalized DDI 27A5228h…"
+            status = "STAGE 11.3.1 PREFLIGHT • developer services missing after reboot • preparing Personalized DDI 27A5228h…"
 
             let assets: DeveloperDiskImageStore.Assets
             do {
                 assets = try await DeveloperDiskImageStore().ensureAssets()
             } catch {
                 busy = false
-                status = "STAGE 11.3.0 FAILED • phase=ddi-assets • \(error.localizedDescription)"
+                status = "STAGE 11.3.1 FAILED • phase=ddi-assets • \(error.localizedDescription)"
                 return
             }
 
-            status = "STAGE 11.3.0 DDI • source=\(assets.sourceLabel) • build=\(assets.buildID) • mounting through phone-local RSD…"
+            status = "STAGE 11.3.1 DDI • source=\(assets.sourceLabel) • build=\(assets.buildID) • mounting through phone-local RSD…"
             let mount = await engine.mountPersonalizedDDI(
                 imagePath: assets.imageURL.path,
                 buildManifestPath: assets.buildManifestURL.path,
@@ -728,27 +728,27 @@ struct ContentView: View {
             )
             guard mount.ok else {
                 busy = false
-                status = "STAGE 11.3.0 FAILED • phase=ddi-mount • \(mount.message)"
+                status = "STAGE 11.3.1 FAILED • phase=ddi-mount • \(mount.message)"
                 return
             }
 
-            status = "STAGE 11.3.0 DDI ✅ • \(mount.message) • rebuilding RSD…"
+            status = "STAGE 11.3.1 DDI ✅ • \(mount.message) • rebuilding RSD…"
             let postMountRSD = await engine.probeRSD()
             guard postMountRSD.ok else {
                 busy = false
-                status = "STAGE 11.3.0 FAILED • phase=post-ddi-rsd • \(postMountRSD.message)"
+                status = "STAGE 11.3.1 FAILED • phase=post-ddi-rsd • \(postMountRSD.message)"
                 return
             }
 
             services = await engine.probeXCTestServices()
             guard services.ok else {
                 busy = false
-                status = "STAGE 11.3.0 FAILED • phase=post-ddi-service-probe • DDI mount returned success but developer services are still absent • \(services.message)"
+                status = "STAGE 11.3.1 FAILED • phase=post-ddi-service-probe • DDI mount returned success but developer services are still absent • \(services.message)"
                 return
             }
         }
 
-        status = "STAGE 11.3.0 PREFLIGHT ✅ • RSD + DDI developer services ready • \(tunnelNote) • checking installed XCTest Runner…"
+        status = "STAGE 11.3.1 PREFLIGHT ✅ • RSD + DDI developer services ready • \(tunnelNote) • checking installed XCTest Runner…"
         var runner = await engine.discoverXCTestRunner()
         if !runner.ok {
             if runnerPackage.source == .embedded && runnerPackage.isEmbeddedRunnerExpired {

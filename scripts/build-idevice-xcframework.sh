@@ -15,68 +15,83 @@ git clone https://github.com/jkcoxson/idevice.git "$CACHE"
 cd "$CACHE"
 git checkout "$PIN"
 
-# Stage 11.3.0: preserve upstream Personalized DDI behavior, but tag the
-# internal failure boundary so a reboot test can tell whether phone-local
-# mounting is blocked by RSD reconnect, TSS personalization, image upload,
-# or MountImage itself. The pin above makes this source patch deterministic.
-python3 - <<'PY_DDI_DIAG'
-from pathlib import Path
-p = Path("idevice/src/services/mobile_image_mounter.rs")
-s = p.read_text()
-old = '''                self.idevice = Self::connect_rsd(provider, handshake).await?.idevice;
+# Stage 11.3.1: add a diagnostic Personalized-DDI helper as a new impl block.
+# Do not rewrite/replace upstream function bodies: Stage 11.3.0 used an exact
+# multiline text replacement here, which was unnecessarily brittle in CI.
+cat >> idevice/src/services/mobile_image_mounter.rs <<'RUST_DDI_DIAG'
 
-                // Get manifest from TSS
-                let manifest_dict: plist::Dictionary = plist::from_bytes(build_manifest)?;
-                self.get_manifest_from_tss(&manifest_dict, unique_chip_id)
-                    .await?
-            }
-        };
-        debug!("Uploading image");
-        self.upload_image_with_progress("Personalized", &image, manifest.clone(), callback, state)
-            .await?;
+// Pikmin Pilot Stage 11.3.1 diagnostic Personalized-DDI mount helper.
+// This intentionally lives in the same module as ImageMounter so it can
+// reconnect the private `idevice` field after QueryPersonalizationManifest
+// closes the socket, while preserving precise failure-stage labels.
+#[cfg(all(feature = "tss", feature = "rsd"))]
+impl ImageMounter {
+    #[allow(clippy::too_many_arguments)]
+    pub async fn pilot_mount_personalized_diagnostic_rsd(
+        &mut self,
+        provider: &mut impl crate::provider::RsdProvider,
+        handshake: &mut crate::rsd::RsdHandshake,
+        image: Vec<u8>,
+        trust_cache: Vec<u8>,
+        build_manifest: &[u8],
+        info_plist: Option<plist::Value>,
+        unique_chip_id: u64,
+    ) -> Result<(), IdeviceError> {
+        let mut hasher = Sha384::new();
+        hasher.update(&image);
+        let image_hash = hasher.finalize();
 
-        debug!("Mounting image");
-        self.mount_image("Personalized", manifest, Some(trust_cache), info_plist)
-            .await?;
-'''
-new = '''                self.idevice = Self::connect_rsd(provider, handshake)
+        let manifest = match self
+            .query_personalization_manifest("DeveloperDiskImage", image_hash.to_vec())
+            .await
+        {
+            Ok(manifest) => manifest,
+            Err(e) => {
+                debug!("Device didn't contain a manifest: {e:?}, fetching from TSS");
+
+                // QueryPersonalizationManifest failure closes this socket.
+                self.idevice = Self::connect_rsd(provider, handshake)
                     .await
-                    .map_err(|e| IdeviceError::UnexpectedResponse(
-                        format!("step=ddi-rsd-reconnect • {e:?}")
-                    ))?
+                    .map_err(|e| {
+                        IdeviceError::UnexpectedResponse(format!(
+                            "step=ddi-rsd-reconnect • {e:?}"
+                        ))
+                    })?
                     .idevice;
 
-                // Get manifest from TSS
                 let manifest_dict: plist::Dictionary = plist::from_bytes(build_manifest)
-                    .map_err(|e| IdeviceError::UnexpectedResponse(
-                        format!("step=ddi-build-manifest-parse • {e:?}")
-                    ))?;
+                    .map_err(|e| {
+                        IdeviceError::UnexpectedResponse(format!(
+                            "step=ddi-build-manifest-parse • {e:?}"
+                        ))
+                    })?;
+
                 self.get_manifest_from_tss(&manifest_dict, unique_chip_id)
                     .await
-                    .map_err(|e| IdeviceError::UnexpectedResponse(
-                        format!("step=ddi-tss-personalization • {e:?}")
-                    ))?
+                    .map_err(|e| {
+                        IdeviceError::UnexpectedResponse(format!(
+                            "step=ddi-tss-personalization • {e:?}"
+                        ))
+                    })?
             }
         };
-        debug!("Uploading image");
-        self.upload_image_with_progress("Personalized", &image, manifest.clone(), callback, state)
-            .await
-            .map_err(|e| IdeviceError::UnexpectedResponse(
-                format!("step=ddi-upload • {e:?}")
-            ))?;
 
-        debug!("Mounting image");
+        self.upload_image("Personalized", &image, manifest.clone())
+            .await
+            .map_err(|e| {
+                IdeviceError::UnexpectedResponse(format!("step=ddi-upload • {e:?}"))
+            })?;
+
         self.mount_image("Personalized", manifest, Some(trust_cache), info_plist)
             .await
-            .map_err(|e| IdeviceError::UnexpectedResponse(
-                format!("step=ddi-mount-image • {e:?}")
-            ))?;
-'''
-if old not in s:
-    raise SystemExit("Stage 11.3.0 DDI diagnostic patch target not found")
-s = s.replace(old, new, 1)
-p.write_text(s)
-PY_DDI_DIAG
+            .map_err(|e| {
+                IdeviceError::UnexpectedResponse(format!("step=ddi-mount-image • {e:?}"))
+            })?;
+
+        Ok(())
+    }
+}
+RUST_DDI_DIAG
 
 # Stage 7.8.5: upstream idevice guesses that every XCTest bootstrap NSError
 # with numeric code 103 means an untrusted developer certificate. That guess

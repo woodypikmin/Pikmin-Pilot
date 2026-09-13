@@ -29,7 +29,7 @@ actor DeveloperDiskImageStore {
     }
 
     // Pinned to the same current personalized DDI build expected by pymobiledevice3
-    // at Stage 11.3.0 creation time. A tagged source avoids an in-place main-branch
+    // at Stage 11.3.1 creation time. A tagged source avoids an in-place main-branch
     // image change while the three payloads are being downloaded.
     static let expectedBuildID = "27A5228h"
     private static let sourceRef = "v0.3.0"

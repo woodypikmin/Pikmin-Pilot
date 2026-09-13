@@ -49,7 +49,7 @@ actor IDeviceEngine {
     }
 
 
-    // Stage 11.3.0: after reboot, missing developer services are a DDI state
+    // Stage 11.3.1: after reboot, missing developer services are a DDI state
     // problem. START PILOT performs DDI preflight before XCTest; do not spin RSD.
     func runXCTestCenterTap() -> Result {
         callBridge { path, message, capacity in

@@ -1,4 +1,4 @@
-// Pikmin Pilot Stage 11.3.0
+// Pikmin Pilot Stage 11.3.1
 // Phone-local Personalized Developer Disk Image mount over the already-proven
 // RPPairing software TCP adapter + trusted RSD session.
 // Equivalent core sequence to pymobiledevice3 mounter auto-mount for iOS 17+:
@@ -140,7 +140,7 @@ pub(crate) unsafe fn pilot_ddi_mount_personalized_impl(
         }
 
         mounter
-            .mount_personalized_rsd(
+            .pilot_mount_personalized_diagnostic_rsd(
                 adapter_ref,
                 handshake_ref,
                 image,

@@ -73,7 +73,7 @@ extern int32_t pilot_xctest_execute_dispatch_tail(
     size_t message_capacity
 );
 
-// Stage 11.3.0 phone-local Personalized DDI mount export.
+// Stage 11.3.1 phone-local Personalized DDI mount export.
 extern int32_t pilot_ddi_mount_personalized(
     struct AdapterHandle *adapter,
     struct RsdHandshakeHandle *handshake,
