@@ -31,6 +31,8 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          Write-Host '--- upstream known_apps.rs anchors before patch ---'
+          Get-Content idevice_pair-1.1.0/src/known_apps.rs | Select-String -Pattern 'Auto Capture|StikDebug|plist|bundle' -Context 3,6 | ForEach-Object { Write-Host $_.ToString() }
           python WindowsPairingSetup/patch_idevice_pair.py idevice_pair-1.1.0/src
           Write-Host '--- Pikmin Pilot patch verification ---'
           Get-ChildItem idevice_pair-1.1.0/src -Recurse -Filter *.rs |
@@ -58,6 +60,6 @@ jobs:
       - name: Upload Windows pairing helper
         uses: actions/upload-artifact@v4
         with:
-          name: PikminPilot-Pairing-Setup-Windows-v1.1
+          name: PikminPilot-Pairing-Setup-Windows-v1.2
           path: out/
           if-no-files-found: error
