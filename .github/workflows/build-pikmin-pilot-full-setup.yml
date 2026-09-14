@@ -1,4 +1,4 @@
-name: Build Pikmin Pilot Full Windows Setup v2.1
+name: Build Pikmin Pilot Full Windows Setup v2.2
 
 on:
   workflow_dispatch:
@@ -126,6 +126,7 @@ jobs:
           Copy-Item pilot\WindowsBootstrap\START_HERE.cmd out\START_HERE.cmd
           Copy-Item pilot\WindowsBootstrap\setup-config.example.json out\setup-config.example.json
           Copy-Item pilot\WindowsBootstrap\README.md out\README.md
+          Copy-Item pilot\WindowsBootstrap\CHECK_USB.cmd out\CHECK_USB.cmd
           Copy-Item _deps\idevice_pair\target\release\idevice_pair.exe out\tools\PikminPilotPairingSetup.exe
           Copy-Item _deps\idevice\target\release\idevice-tools.exe out\tools\idevice-tools.exe
           Copy-Item _deps\idevice\target\release\idevice_id.exe out\tools\idevice_id.exe
@@ -163,6 +164,7 @@ jobs:
           $required = @(
             'out\PikminPilotSetup.exe',
             'out\START_HERE.cmd',
+            'out\CHECK_USB.cmd',
             'out\tools\PikminPilotPairingSetup.exe',
             'out\tools\idevice-tools.exe',
             'out\tools\idevice_id.exe'
@@ -173,9 +175,9 @@ jobs:
           }
           Get-ChildItem out -Recurse | Select-Object FullName, Length
 
-      - name: Upload full Windows Setup v2.1
+      - name: Upload full Windows Setup v2.2
         uses: actions/upload-artifact@v4
         with:
-          name: PikminPilot-Full-Windows-Setup-v2.1
+          name: PikminPilot-Full-Windows-Setup-v2.2
           path: out/
           if-no-files-found: error
