@@ -1,0 +1,85 @@
+name: Build Pikmin Pilot Full Windows Setup
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build patched idevice_pair v1.1.0
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Invoke-WebRequest -Uri 'https://github.com/jkcoxson/idevice_pair/archive/refs/tags/v1.1.0.zip' -OutFile idevice_pair.zip
+          Expand-Archive idevice_pair.zip -DestinationPath . -Force
+          $path = 'idevice_pair-1.1.0\src\known_apps.rs'
+          $text = [IO.File]::ReadAllText($path)
+          $needle = 'const REMOTE: &[KnownApp] = &['
+          $entry = '    ("Pikmin Pilot", "rp_pairing_file.plist"),'
+          $start = $text.IndexOf($needle, [StringComparison]::Ordinal)
+          if ($start -lt 0) { throw 'REMOTE known-app table not found' }
+          $end = $text.IndexOf('];', $start, [StringComparison]::Ordinal)
+          if ($end -lt 0) { throw 'REMOTE table end not found' }
+          $block = $text.Substring($start, $end - $start)
+          if (-not $block.Contains('("Pikmin Pilot", "rp_pairing_file.plist")')) {
+            $lineEnd = $text.IndexOf("`n", $start)
+            $text = $text.Insert($lineEnd + 1, $entry + "`n")
+            [IO.File]::WriteAllText($path, $text, [Text.UTF8Encoding]::new($false))
+          }
+          Push-Location idevice_pair-1.1.0
+          cargo build --release
+          Pop-Location
+          if (-not (Test-Path 'idevice_pair-1.1.0\target\release\idevice_pair.exe')) { throw 'idevice_pair.exe missing' }
+
+      - name: Build idevice USB detector + IPA installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Invoke-WebRequest -Uri 'https://github.com/jkcoxson/idevice/archive/refs/heads/master.zip' -OutFile idevice.zip
+          Expand-Archive idevice.zip -DestinationPath . -Force
+          Push-Location idevice-master
+          rustc --version
+          cargo build --release -p idevice-tools --no-default-features --features ring --bin idevice-tools --bin idevice_id
+          Pop-Location
+          if (-not (Test-Path 'idevice-master\target\release\idevice-tools.exe')) { throw 'idevice-tools.exe missing' }
+          if (-not (Test-Path 'idevice-master\target\release\idevice_id.exe')) { throw 'idevice_id.exe missing' }
+
+      - name: Install .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build PikminPilotSetup.exe
+        shell: pwsh
+        run: |
+          dotnet publish WindowsBootstrap/PikminPilotSetup/PikminPilotSetup.csproj `
+            -c Release -r win-x64 --self-contained true `
+            -p:PublishSingleFile=true -p:PublishTrimmed=false `
+            -o setup-publish
+          if (-not (Test-Path 'setup-publish\PikminPilotSetup.exe')) { throw 'PikminPilotSetup.exe missing' }
+
+      - name: Package full bootstrap
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path out\tools | Out-Null
+          Copy-Item setup-publish\PikminPilotSetup.exe out\PikminPilotSetup.exe
+          Copy-Item WindowsBootstrap\setup-config.example.json out\setup-config.example.json
+          Copy-Item WindowsBootstrap\README.md out\README.md
+          Copy-Item idevice_pair-1.1.0\target\release\idevice_pair.exe out\tools\PikminPilotPairingSetup.exe
+          Copy-Item idevice-master\target\release\idevice-tools.exe out\tools\idevice-tools.exe
+          Copy-Item idevice-master\target\release\idevice_id.exe out\tools\idevice_id.exe
+
+      - name: Upload full Windows Setup
+        uses: actions/upload-artifact@v4
+        with:
+          name: PikminPilot-Full-Windows-Setup-v2.0
+          path: out/
+          if-no-files-found: error

@@ -1,0 +1,148 @@
+name: Register Device + Build Pikmin Pilot
+
+on:
+  workflow_dispatch:
+    inputs:
+      device_udid:
+        description: iPhone/iPad UDID
+        required: true
+        type: string
+      device_name:
+        description: Device display name
+        required: true
+        type: string
+
+concurrency:
+  group: pikminpilot-device-registration
+  cancel-in-progress: false
+
+jobs:
+  register-refresh-build-publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ secrets.REPO_ADMIN_TOKEN }}
+      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+      ASC_PRIVATE_KEY_B64: ${{ secrets.ASC_PRIVATE_KEY_B64 }}
+      ASC_CERTIFICATE_ID: ${{ secrets.ASC_CERTIFICATE_ID }}
+      APPLE_DEV_P12_B64: ${{ secrets.APPLE_DEV_P12_B64 }}
+      APPLE_DEV_P12_PASSWORD: ${{ secrets.APPLE_DEV_P12_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate bootstrap secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          for n in GH_TOKEN ASC_ISSUER_ID ASC_KEY_ID ASC_PRIVATE_KEY_B64 APPLE_DEV_P12_B64 APPLE_DEV_P12_PASSWORD; do
+            [ -n "${!n:-}" ] || { echo "Missing secret: $n"; exit 2; }
+          done
+
+      - name: Install Apple API Python dependencies
+        run: python3 -m pip install --disable-pip-version-check PyJWT cryptography requests
+
+      - name: Match App Store Connect certificate to signing P12
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s' "$APPLE_DEV_P12_B64" | base64 -d > signing.p12
+          openssl pkcs12 -in signing.p12 -clcerts -nokeys -passin "pass:$APPLE_DEV_P12_PASSWORD" -out signing-cert.pem
+          SERIAL="$(openssl x509 -in signing-cert.pem -noout -serial | sed 's/^serial=//I')"
+          test -n "$SERIAL"
+          echo "ASC_CERTIFICATE_SERIAL=$SERIAL" >> "$GITHUB_ENV"
+          echo "Signing P12 certificate serial: $SERIAL"
+
+      - name: Register device and create fresh profiles
+        shell: bash
+        env:
+          DEVICE_UDID: ${{ inputs.device_udid }}
+          DEVICE_NAME: ${{ inputs.device_name }}
+        run: |
+          set -euo pipefail
+          python3 AppleRegistration/register_device_and_profiles.py \
+            --udid "$DEVICE_UDID" \
+            --name "$DEVICE_NAME" \
+            --out generated-profiles
+
+      - name: Refresh repository profile secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh secret set PROFILE_APP_B64 --body "$(base64 -w0 generated-profiles/App.mobileprovision)"
+          gh secret set PROFILE_TUNNEL_B64 --body "$(base64 -w0 generated-profiles/Tunnel.mobileprovision)"
+          gh secret set PROFILE_XCTRUNNER_B64 --body "$(base64 -w0 generated-profiles/XCTRunner.mobileprovision)"
+          echo 'Provisioning profile secrets refreshed.'
+
+      - name: Trigger existing build-ios.yml
+        id: trigger
+        shell: bash
+        run: |
+          set -euo pipefail
+          TRIGGERED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "triggered_at=$TRIGGERED_AT" >> "$GITHUB_OUTPUT"
+          gh workflow run build-ios.yml --ref "${GITHUB_REF_NAME:-main}"
+          echo 'Triggered build-ios.yml'
+
+      - name: Find and wait for triggered build
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          AFTER='${{ steps.trigger.outputs.triggered_at }}'
+          RUN_ID=''
+          for _ in $(seq 1 60); do
+            RUN_ID="$(gh run list --workflow build-ios.yml --event workflow_dispatch --limit 30 \
+              --json databaseId,createdAt \
+              --jq ".[] | select(.createdAt >= \"$AFTER\") | .databaseId" | head -1 || true)"
+            [ -n "$RUN_ID" ] && break
+            sleep 5
+          done
+          [ -n "$RUN_ID" ] || { echo 'Could not identify triggered build-ios run'; exit 20; }
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "Waiting for build-ios run $RUN_ID"
+          gh run watch "$RUN_ID" --exit-status
+
+      - name: Download signed IPA artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p built
+          gh run download '${{ steps.build.outputs.run_id }}' -D built
+          IPA="$(find built -type f -name 'PikminPilot-*-FULLY-SIGNED-DEVELOPMENT.ipa' -print -quit)"
+          [ -n "$IPA" ] || { find built -maxdepth 4 -type f -print; echo 'Signed Pikmin Pilot IPA not found'; exit 21; }
+          cp "$IPA" PikminPilot-Latest-FULLY-SIGNED-DEVELOPMENT.ipa
+
+      - name: Publish device-ready bootstrap release
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DEVICE_UDID='${{ inputs.device_udid }}'
+          REQUEST_ID="$(python3 - <<'PY'
+          import hashlib, os
+          print(hashlib.sha256(os.environ['DEVICE_UDID'].encode()).hexdigest()[:20])
+          PY
+          )"
+          UDID_HASH="$(python3 - <<'PY'
+          import hashlib, os
+          print(hashlib.sha256(os.environ['DEVICE_UDID'].encode()).hexdigest())
+          PY
+          )"
+          python3 - <<PY
+          import json, datetime
+          json.dump({
+            'requestId': '$REQUEST_ID',
+            'udidSha256': '$UDID_HASH',
+            'createdAt': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            'ipaFilename': 'PikminPilot-Latest-FULLY-SIGNED-DEVELOPMENT.ipa'
+          }, open('bootstrap.json','w'), indent=2)
+          PY
+          gh release delete pikminpilot-latest --cleanup-tag -y || true
+          gh release create pikminpilot-latest \
+            PikminPilot-Latest-FULLY-SIGNED-DEVELOPMENT.ipa bootstrap.json \
+            --target "$GITHUB_SHA" \
+            --title 'Pikmin Pilot Latest Registered-Device Build' \
+            --notes "Generated for registration request $REQUEST_ID"
+          echo "Published request $REQUEST_ID"
