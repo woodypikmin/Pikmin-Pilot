@@ -1,0 +1,4 @@
+This helper is built from jkcoxson/idevice_pair v1.1.0 with a minimal patch that adds
+"Pikmin Pilot" as a supported Remote Pairing destination and changes the window title.
+Upstream project: https://github.com/jkcoxson/idevice_pair
+Upstream license: MIT (as declared by the upstream project README).
