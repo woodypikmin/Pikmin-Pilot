@@ -1,26 +1,62 @@
-name: Build Pikmin Pilot Full Windows Setup
+name: Build Pikmin Pilot Full Windows Setup v2.1
 
 on:
   workflow_dispatch:
+    inputs:
+      include_latest_signed_ipa:
+        description: 'Bundle the latest successful build-ios.yml IPA into Setup'
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+  actions: read
 
 jobs:
   build:
     runs-on: windows-latest
-    permissions:
-      contents: read
+    env:
+      CARGO_NET_RETRY: '10'
+      CARGO_HTTP_TIMEOUT: '180'
+      CARGO_TERM_COLOR: always
+      RUSTFLAGS: '-C target-feature=+crt-static'
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Pikmin Pilot repo
+        uses: actions/checkout@v4
+        with:
+          path: pilot
+
+      # Use checkout instead of direct source-archive HTTP downloads. This avoids the
+      # transient 504 that killed v2.0 before compilation even started.
+      - name: Checkout idevice_pair v1.1.0
+        uses: actions/checkout@v4
+        with:
+          repository: jkcoxson/idevice_pair
+          ref: v1.1.0
+          path: _deps/idevice_pair
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout idevice
+        uses: actions/checkout@v4
+        with:
+          repository: jkcoxson/idevice
+          ref: master
+          path: _deps/idevice
+          fetch-depth: 1
+          persist-credentials: false
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Build patched idevice_pair v1.1.0
+      - name: Patch and build pairing GUI
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          Invoke-WebRequest -Uri 'https://github.com/jkcoxson/idevice_pair/archive/refs/tags/v1.1.0.zip' -OutFile idevice_pair.zip
-          Expand-Archive idevice_pair.zip -DestinationPath . -Force
-          $path = 'idevice_pair-1.1.0\src\known_apps.rs'
+          $path = '_deps\idevice_pair\src\known_apps.rs'
+          if (-not (Test-Path $path)) { throw "known_apps.rs missing: $path" }
           $text = [IO.File]::ReadAllText($path)
           $needle = 'const REMOTE: &[KnownApp] = &['
           $entry = '    ("Pikmin Pilot", "rp_pairing_file.plist"),'
@@ -31,55 +67,115 @@ jobs:
           $block = $text.Substring($start, $end - $start)
           if (-not $block.Contains('("Pikmin Pilot", "rp_pairing_file.plist")')) {
             $lineEnd = $text.IndexOf("`n", $start)
+            if ($lineEnd -lt 0) { throw 'REMOTE table first line ending not found' }
             $text = $text.Insert($lineEnd + 1, $entry + "`n")
             [IO.File]::WriteAllText($path, $text, [Text.UTF8Encoding]::new($false))
           }
-          Push-Location idevice_pair-1.1.0
+          $verify = [IO.File]::ReadAllText($path)
+          if (-not $verify.Contains('("Pikmin Pilot", "rp_pairing_file.plist")')) {
+            throw 'Pikmin Pilot pairing destination was not inserted'
+          }
+          Write-Host 'Pikmin Pilot pairing destination verified.'
+          Push-Location _deps\idevice_pair
+          rustc --version
+          cargo --version
           cargo build --release
           Pop-Location
-          if (-not (Test-Path 'idevice_pair-1.1.0\target\release\idevice_pair.exe')) { throw 'idevice_pair.exe missing' }
+          $exe = '_deps\idevice_pair\target\release\idevice_pair.exe'
+          if (-not (Test-Path $exe)) { throw 'idevice_pair.exe missing after build' }
+          Write-Host "Pairing GUI: $exe"
 
-      - name: Build idevice USB detector + IPA installer
+      - name: Build idevice USB detector and IPA installer
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          Invoke-WebRequest -Uri 'https://github.com/jkcoxson/idevice/archive/refs/heads/master.zip' -OutFile idevice.zip
-          Expand-Archive idevice.zip -DestinationPath . -Force
-          Push-Location idevice-master
+          Push-Location _deps\idevice\tools
+          git rev-parse HEAD
           rustc --version
-          cargo build --release -p idevice-tools --no-default-features --features ring --bin idevice-tools --bin idevice_id
+          cargo --version
+          # Match upstream's native tools build rather than using an ad-hoc
+          # source ZIP or a fragile partial dependency configuration.
+          cargo build --release --bin idevice-tools --bin idevice_id
           Pop-Location
-          if (-not (Test-Path 'idevice-master\target\release\idevice-tools.exe')) { throw 'idevice-tools.exe missing' }
-          if (-not (Test-Path 'idevice-master\target\release\idevice_id.exe')) { throw 'idevice_id.exe missing' }
+          $toolsExe = '_deps\idevice\target\release\idevice-tools.exe'
+          $idExe = '_deps\idevice\target\release\idevice_id.exe'
+          if (-not (Test-Path $toolsExe)) { throw 'idevice-tools.exe missing' }
+          if (-not (Test-Path $idExe)) { throw 'idevice_id.exe missing' }
 
       - name: Install .NET 8
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
 
-      - name: Build PikminPilotSetup.exe
+      - name: Build visible WinForms PikminPilotSetup.exe
         shell: pwsh
         run: |
-          dotnet publish WindowsBootstrap/PikminPilotSetup/PikminPilotSetup.csproj `
+          $ErrorActionPreference = 'Stop'
+          dotnet publish pilot/WindowsBootstrap/PikminPilotSetup/PikminPilotSetup.csproj `
             -c Release -r win-x64 --self-contained true `
             -p:PublishSingleFile=true -p:PublishTrimmed=false `
             -o setup-publish
           if (-not (Test-Path 'setup-publish\PikminPilotSetup.exe')) { throw 'PikminPilotSetup.exe missing' }
 
-      - name: Package full bootstrap
+      - name: Package bootstrap tools
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force -Path out\tools | Out-Null
           Copy-Item setup-publish\PikminPilotSetup.exe out\PikminPilotSetup.exe
-          Copy-Item WindowsBootstrap\setup-config.example.json out\setup-config.example.json
-          Copy-Item WindowsBootstrap\README.md out\README.md
-          Copy-Item idevice_pair-1.1.0\target\release\idevice_pair.exe out\tools\PikminPilotPairingSetup.exe
-          Copy-Item idevice-master\target\release\idevice-tools.exe out\tools\idevice-tools.exe
-          Copy-Item idevice-master\target\release\idevice_id.exe out\tools\idevice_id.exe
+          Copy-Item pilot\WindowsBootstrap\START_HERE.cmd out\START_HERE.cmd
+          Copy-Item pilot\WindowsBootstrap\setup-config.example.json out\setup-config.example.json
+          Copy-Item pilot\WindowsBootstrap\README.md out\README.md
+          Copy-Item _deps\idevice_pair\target\release\idevice_pair.exe out\tools\PikminPilotPairingSetup.exe
+          Copy-Item _deps\idevice\target\release\idevice-tools.exe out\tools\idevice-tools.exe
+          Copy-Item _deps\idevice\target\release\idevice_id.exe out\tools\idevice_id.exe
 
-      - name: Upload full Windows Setup
+      - name: Bundle latest signed Pikmin Pilot IPA
+        if: ${{ inputs.include_latest_signed_ipa }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Push-Location pilot
+          $json = gh run list --workflow build-ios.yml --status success --limit 1 --json databaseId,displayTitle,createdAt
+          $runs = $json | ConvertFrom-Json
+          if (-not $runs -or $runs.Count -lt 1) {
+            throw 'No successful build-ios.yml run found. Build Pikmin Pilot once first, then rerun this workflow.'
+          }
+          $runId = $runs[0].databaseId
+          Write-Host "Downloading latest successful build-ios.yml artifacts from run $runId"
+          Pop-Location
+          New-Item -ItemType Directory -Force -Path ios-artifact | Out-Null
+          Push-Location pilot
+          gh run download $runId -D ..\ios-artifact
+          Pop-Location
+          $ipa = Get-ChildItem ios-artifact -Recurse -File -Filter *.ipa | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $ipa) { throw "No IPA found in artifacts from build-ios.yml run $runId" }
+          if ($ipa.Length -lt 100KB) { throw "IPA is unexpectedly small: $($ipa.FullName)" }
+          Copy-Item $ipa.FullName out\PikminPilot.ipa
+          Write-Host "Bundled IPA: $($ipa.FullName) ($([math]::Round($ipa.Length/1MB, 1)) MB)"
+
+      - name: Bootstrap artifact self-check
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $required = @(
+            'out\PikminPilotSetup.exe',
+            'out\START_HERE.cmd',
+            'out\tools\PikminPilotPairingSetup.exe',
+            'out\tools\idevice-tools.exe',
+            'out\tools\idevice_id.exe'
+          )
+          foreach ($f in $required) { if (-not (Test-Path $f)) { throw "Missing packaged file: $f" } }
+          if ('${{ inputs.include_latest_signed_ipa }}' -eq 'true' -and -not (Test-Path 'out\PikminPilot.ipa')) {
+            throw 'include_latest_signed_ipa=true but PikminPilot.ipa is missing'
+          }
+          Get-ChildItem out -Recurse | Select-Object FullName, Length
+
+      - name: Upload full Windows Setup v2.1
         uses: actions/upload-artifact@v4
         with:
-          name: PikminPilot-Full-Windows-Setup-v2.0
+          name: PikminPilot-Full-Windows-Setup-v2.1
           path: out/
           if-no-files-found: error
