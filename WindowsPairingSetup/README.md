@@ -18,3 +18,9 @@
 - 視窗名稱改成 `Pikmin Pilot Pairing Setup`
 
 Upstream 已經支援 USB 產生 Remote Pairing、AFC/House Arrest 直接寫入 App Documents、以及 pairing 驗證。
+
+
+## v1.2 patch strategy
+
+`idevice_pair v1.1.0` keeps the destination metadata in `src/known_apps.rs`.
+The toolkit now clones an existing known Remote-Pairing-capable app record (`Auto Capture`, fallback `StikDebug`) and rewrites only the display name, bundle id, and remote pairing filename for Pikmin Pilot. It no longer guesses a `supported_apps_for_mode()` function or map name.
