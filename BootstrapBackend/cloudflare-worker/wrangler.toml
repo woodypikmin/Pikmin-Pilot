@@ -1,0 +1,8 @@
+name = "pikmin-pilot-bootstrap"
+main = "worker.js"
+compatibility_date = "2026-09-01"
+
+[vars]
+GITHUB_OWNER = "woodypikmin"
+GITHUB_REPO = "Pikmin-Pilot"
+GITHUB_REF = "main"

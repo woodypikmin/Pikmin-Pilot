@@ -1,0 +1,8 @@
+{
+  "bootstrapApiBase": "https://YOUR-WORKER.workers.dev",
+  "registrationToken": "CHANGE_ME",
+  "ipaUrl": "",
+  "localIpaFile": "PikminPilot.ipa",
+  "pollSeconds": 12,
+  "maxWaitMinutes": 35
+}
