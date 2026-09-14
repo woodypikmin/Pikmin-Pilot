@@ -26,6 +26,15 @@ actor IDeviceEngine {
         }
     }
 
+    /// Stage 11.5.4.2: fixed-port transport discriminator for cellular-only.
+    /// It intentionally bypasses RPPairing createListener and asks lockdownd
+    /// QueryType through the integrated reflector at 10.7.0.1:62078.
+    func probeCellularLockdownRoute() -> Result {
+        callBridgeWithoutPairing { message, capacity in
+            PPProbeCellularLockdownRoute(message, capacity)
+        }
+    }
+
     func probeRSD() -> Result {
         callBridge { path, message, capacity in
             host.withCString { hostCString in
@@ -240,6 +249,17 @@ actor IDeviceEngine {
                 }
             }
         }
+    }
+
+    private func callBridgeWithoutPairing(
+        _ body: (_ message: UnsafeMutablePointer<CChar>, _ capacity: Int) -> Int32
+    ) -> Result {
+        var message = [CChar](repeating: 0, count: 4096)
+        let code = message.withUnsafeMutableBufferPointer { buffer in
+            body(buffer.baseAddress!, buffer.count)
+        }
+        let text = String(cString: message)
+        return Result(ok: code == 0, message: text.isEmpty ? "code=\(code)" : text)
     }
 
     private func callBridge(

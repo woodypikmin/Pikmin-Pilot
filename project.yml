@@ -11,9 +11,6 @@ targets:
   PikminPilot:
     type: application
     platform: iOS
-    # Stage 11.5.4.1: explicit 11.5.3-baseline source allowlist.
-    # Do NOT scan the whole PikminPilot/ directory: overwrite-style repo updates
-    # can leave 11.6.x files such as PhoneLocalPairingBootstrap.swift behind.
     sources:
     - path: PikminPilot/ContentView.swift
     - path: PikminPilot/DeveloperDiskImageStore.swift
@@ -24,6 +21,7 @@ targets:
     - path: PikminPilot/PairingRecordStore.swift
     - path: PikminPilot/PikminPilotApp.swift
     - path: PikminPilot/PikminTunnelManager.swift
+    - path: PikminPilot/PilotIDeviceBridge.h
     - path: PikminPilot/PilotIDeviceBridge.m
     - path: PikminPilot/PilotOptions.swift
     - path: PikminPilot/PilotTransport.swift
@@ -56,8 +54,8 @@ targets:
         - -lc++
         - -lz
         CODE_SIGN_STYLE: Manual
-        CURRENT_PROJECT_VERSION: '11541'
-        MARKETING_VERSION: '11.5.4.1'
+        CURRENT_PROJECT_VERSION: '1153'
+        MARKETING_VERSION: '11.5.4.2'
     scheme:
       testTargets:
       - PikminPilotRunnerUITests
@@ -67,8 +65,7 @@ targets:
     type: app-extension
     platform: iOS
     sources:
-    - path: PikminPilotTunnel/PacketTunnelProvider.swift
-    - path: PikminPilotTunnel/TunnelConstants.swift
+    - path: PikminPilotTunnel
     dependencies:
     - sdk: NetworkExtension.framework
     settings:
@@ -81,13 +78,13 @@ targets:
         SKIP_INSTALL: YES
         APPLICATION_EXTENSION_API_ONLY: YES
         CODE_SIGN_STYLE: Manual
-        CURRENT_PROJECT_VERSION: '11541'
-        MARKETING_VERSION: '11.5.4.1'
+        CURRENT_PROJECT_VERSION: '1153'
+        MARKETING_VERSION: '11.5.4.2'
   PikminPilotRunnerUITests:
     type: bundle.ui-testing
     platform: iOS
     sources:
-    - path: PikminPilotRunnerUITests/PikminPilotRunnerUITests.swift
+    - path: PikminPilotRunnerUITests
     dependencies:
     - target: PikminPilot
     settings:
@@ -99,4 +96,4 @@ targets:
         GENERATE_INFOPLIST_FILE: true
         CODE_SIGN_STYLE: Automatic
         CURRENT_PROJECT_VERSION: '1153'
-        MARKETING_VERSION: '11.5.3'
+        MARKETING_VERSION: '11.5.4.2'

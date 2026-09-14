@@ -23,6 +23,15 @@ int32_t PPNoVPNSelfTransportProbe(
     size_t messageCapacity
 );
 
+/// Stage 11.5.4.2 cellular route discriminator. Probes lockdownd QueryType
+/// through the integrated LocalDevVPN reflector at 10.7.0.1:62078.
+/// This fixed-port path does not use the RPPairing createListener tunnel.
+/// Returns 0 only when a valid lockdownd reply is received.
+int32_t PPProbeCellularLockdownRoute(
+    char *message,
+    size_t messageCapacity
+);
+
 /// Creates an on-device RPPairing tunnel to host:port and performs an RSD
 /// handshake. Returns 0 on success.
 int32_t PPProbeRSD(

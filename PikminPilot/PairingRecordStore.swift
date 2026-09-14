@@ -29,6 +29,24 @@ final class PairingRecordStore: ObservableObject {
         Bundle.main.url(forResource: embeddedResourceName, withExtension: "plist")
     }
 
+    /// Stage 11.5.4.2 transport diagnostics only. Does not modify the record.
+    /// RPPairing uses identifier/public_key/private_key; the alternate
+    /// CoreDeviceProxy route needs a classic lockdown record as well.
+    func recordKindSummary() -> String {
+        guard let data = try? Data(contentsOf: destinationURL),
+              let object = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil),
+              let dict = object as? [String: Any] else {
+            return "pairing=unreadable"
+        }
+
+        let remoteKeys = ["identifier", "public_key", "private_key"]
+        let classicKeys = ["HostID", "SystemBUID", "HostCertificate", "HostPrivateKey", "RootCertificate", "RootPrivateKey", "EscrowBag"]
+        let hasRemote = remoteKeys.allSatisfy { dict[$0] != nil }
+        let classicCount = classicKeys.reduce(0) { $0 + (dict[$1] != nil ? 1 : 0) }
+        let hasClassic = classicCount >= 5 && dict["HostID"] != nil && dict["SystemBUID"] != nil
+        return "pairing remote=\(hasRemote ? "YES" : "NO") classic=\(hasClassic ? "YES" : "NO") (\(classicCount)/\(classicKeys.count) classic keys)"
+    }
+
     func refresh() {
         let url = destinationURL
         if FileManager.default.fileExists(atPath: url.path) {

@@ -265,6 +265,17 @@ static NSString *PPProbeLockdownAddress(NSString *host, BOOL *readyOut) {
     return [NSString stringWithFormat:@"TCP=CONNECTED LOCKDOWN=REPLY keys=%@", [keys componentsJoinedByString:@","]];
 }
 
+int32_t PPProbeCellularLockdownRoute(char *message, size_t messageCapacity) {
+    BOOL ready = NO;
+    NSString *result = PPProbeLockdownAddress(@"10.7.0.1", &ready);
+    NSString *text = [NSString stringWithFormat:
+        @"CELLULAR LOCKDOWN ROUTE %@ • 10.7.0.1:62078 • %@",
+        ready ? @"READY ✅" : @"FAILED ❌",
+        result];
+    PPWriteMessage(message, messageCapacity, text);
+    return ready ? 0 : 1;
+}
+
 int32_t PPNoVPNSelfTransportProbe(char *message, size_t messageCapacity) {
     NSMutableArray<NSString *> *lines = [NSMutableArray arrayWithObject:@"NO-VPN SELF PROBE"];
     BOOL anyReady = NO;
