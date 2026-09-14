@@ -55,7 +55,7 @@ internal sealed class MainForm : Form
 
     public MainForm()
     {
-        Text = "Pikmin Pilot Setup v2.1";
+        Text = "Pikmin Pilot Setup v2.2";
         Width = 820;
         Height = 650;
         StartPosition = FormStartPosition.CenterScreen;
@@ -122,7 +122,12 @@ internal sealed class MainForm : Form
 
     private async Task RefreshDeviceAsync()
     {
-        SetBusy(true, "正在偵測 USB 裝置…");
+        // Do not lock the entire window during USB discovery. The user must always
+        // be able to move the window and open the log even if a USB backend stalls.
+        _refresh.Enabled = false;
+        _setup.Enabled = false;
+        _status.Text = "正在偵測 USB 裝置…（每個偵測器最多 8–10 秒）";
+        Cursor = Cursors.Default;
         try
         {
             var udids = await DetectDevices();
@@ -130,8 +135,11 @@ internal sealed class MainForm : Form
             {
                 _currentUdid = null;
                 _udid.Text = "";
-                _status.Text = "找不到裝置 — 請 USB 連線、解鎖並按『信任』";
-                Log("找不到 iPhone / iPad。確認 Apple Mobile Device / iTunes 驅動已安裝。", error: true);
+                _status.Text = "找不到裝置 — USB 偵測已停止，不會繼續轉圈";
+                Log("找不到 iPhone / iPad。請確認：USB 已連線、手機解鎖並按『信任』、Apple Mobile Device/iTunes 驅動正常。可按『開啟 Log』查看 idevice_id / pymobiledevice3 的實際結果。", error: true);
+                MessageBox.Show(
+                    "8–10 秒內沒有偵測到 iPhone / iPad。\n\n請確認：\n1. 手機已解鎖並按『信任』\n2. Apple Mobile Device / iTunes USB driver 正常\n3. 重新插拔 USB 後按『重新偵測』\n\nSetup 不會再無限轉圈。詳細資料請看 Log。",
+                    "USB device not detected", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
             if (udids.Count > 1)
@@ -156,7 +164,11 @@ internal sealed class MainForm : Form
         }
         finally
         {
-            SetBusy(false);
+            _refresh.Enabled = true;
+            _pairing.Enabled = true;
+            _openLog.Enabled = true;
+            _setup.Enabled = !string.IsNullOrWhiteSpace(_currentUdid);
+            Cursor = Cursors.Default;
         }
     }
 
@@ -221,27 +233,111 @@ internal sealed class MainForm : Form
         }) ?? new SetupConfig();
     }
 
-    private static async Task<List<string>> DetectDevices()
+    private async Task<List<string>> DetectDevices()
     {
+        // v2.2: USB discovery must never make the GUI look frozen.
+        // Use the standard idevice_id -l invocation once with a short hard timeout.
+        // If the bundled Rust detector cannot talk to Apple's usbmuxd on this PC,
+        // optionally fall back to an already-installed pymobiledevice3.
         string exe = Tool("idevice_id.exe");
-        var attempts = new[]
+        Log($"USB probe: {Path.GetFileName(exe)} -l (8s timeout)");
+
+        try
         {
-            Array.Empty<string>(),
-            new[] { "-l" },
-            new[] { "list" }
-        };
-        foreach (var args in attempts)
-        {
-            var result = await RunCapture(exe, args, allowFailure: true);
-            var ids = result.Output
-                .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
-                .Select(x => x.Trim())
-                .Where(x => Regex.IsMatch(x, "^[A-Za-z0-9-]{20,64}$"))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToList();
+            var result = await RunCapture(exe, new[] { "-l" }, allowFailure: true, timeout: TimeSpan.FromSeconds(8));
+            Log($"idevice_id exit={result.ExitCode} output={Compact(result.Output)}");
+            var ids = ParseUdidLines(result.Output);
             if (ids.Count > 0) return ids;
         }
+        catch (TimeoutException ex)
+        {
+            Log(ex.Message, error: true);
+        }
+        catch (Exception ex)
+        {
+            Log($"Bundled idevice_id failed: {ex.Message}", error: true);
+        }
+
+        foreach (var python in new[] { "python.exe", "python", "py.exe", "py" })
+        {
+            try
+            {
+                string[] args = (python.Equals("py.exe", StringComparison.OrdinalIgnoreCase) || python.Equals("py", StringComparison.OrdinalIgnoreCase))
+                    ? new[] { "-3", "-m", "pymobiledevice3", "usbmux", "list" }
+                    : new[] { "-m", "pymobiledevice3", "usbmux", "list" };
+                Log($"USB fallback probe: {python} {string.Join(" ", args)} (10s timeout)");
+                var result = await RunCapture(python, args, allowFailure: true, timeout: TimeSpan.FromSeconds(10), searchPath: true);
+                if (result.ExitCode != 0) continue;
+                var ids = ParsePymobiledeviceJson(result.Output);
+                if (ids.Count > 0)
+                {
+                    Log("USB device detected through pymobiledevice3 fallback.");
+                    return ids;
+                }
+            }
+            catch (System.ComponentModel.Win32Exception)
+            {
+                // Python launcher not installed; try the next candidate.
+            }
+            catch (TimeoutException ex)
+            {
+                Log(ex.Message, error: true);
+            }
+            catch (Exception ex)
+            {
+                Log($"pymobiledevice3 fallback failed via {python}: {ex.Message}", error: true);
+            }
+        }
+
         return new List<string>();
+    }
+
+    private static List<string> ParseUdidLines(string output)
+    {
+        return output
+            .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+            .Select(x => x.Trim())
+            .Where(x => Regex.IsMatch(x, "^[A-Za-z0-9-]{20,64}$"))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private static List<string> ParsePymobiledeviceJson(string output)
+    {
+        try
+        {
+            int start = output.IndexOf('[');
+            int end = output.LastIndexOf(']');
+            if (start < 0 || end <= start) return new List<string>();
+            using var doc = JsonDocument.Parse(output.Substring(start, end - start + 1));
+            var ids = new List<string>();
+            foreach (var item in doc.RootElement.EnumerateArray())
+            {
+                foreach (string key in new[] { "UniqueDeviceID", "Identifier", "UDID" })
+                {
+                    if (item.TryGetProperty(key, out var value))
+                    {
+                        string? id = value.GetString();
+                        if (!string.IsNullOrWhiteSpace(id) && Regex.IsMatch(id, "^[A-Za-z0-9-]{20,64}$"))
+                        {
+                            ids.Add(id);
+                            break;
+                        }
+                    }
+                }
+            }
+            return ids.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        }
+        catch
+        {
+            return new List<string>();
+        }
+    }
+
+    private static string Compact(string text)
+    {
+        string oneLine = Regex.Replace(text ?? string.Empty, "\\s+", " ").Trim();
+        return oneLine.Length <= 500 ? oneLine : oneLine[..500] + "…";
     }
 
     private static async Task<string> ResolveIpa(SetupConfig cfg, string udid, string deviceName)
@@ -261,7 +357,7 @@ internal sealed class MainForm : Form
         throw new InvalidOperationException(
             "Setup 包裡沒有 PikminPilot.ipa，而且尚未設定 registration backend。\n\n" +
             $"此裝置 UDID 已寫入：{requestPath}\n\n" +
-            "如果這是你自己測試，請先讓 GitHub build-ios.yml 成功一次，再重新 build Full Windows Setup v2.1。"
+            "如果這是你自己測試，請先讓 GitHub build-ios.yml 成功一次，再重新 build Full Windows Setup v2.2。"
         );
     }
 
@@ -318,10 +414,10 @@ internal sealed class MainForm : Form
     private static async Task InstallIpa(string udid, string ipa)
     {
         string tools = Tool("idevice-tools.exe");
-        var install = await RunCapture(tools, new[] { "--udid", udid, "ideviceinstaller", "install", ipa }, allowFailure: true, timeoutMinutes: 15);
+        var install = await RunCapture(tools, new[] { "--udid", udid, "ideviceinstaller", "install", ipa }, allowFailure: true, timeout: TimeSpan.FromMinutes(15));
         if (install.ExitCode == 0 && install.Output.Contains("install success", StringComparison.OrdinalIgnoreCase)) return;
 
-        var upgrade = await RunCapture(tools, new[] { "--udid", udid, "ideviceinstaller", "upgrade", ipa }, allowFailure: true, timeoutMinutes: 15);
+        var upgrade = await RunCapture(tools, new[] { "--udid", udid, "ideviceinstaller", "upgrade", ipa }, allowFailure: true, timeout: TimeSpan.FromMinutes(15));
         if (upgrade.ExitCode == 0 && upgrade.Output.Contains("upgrade success", StringComparison.OrdinalIgnoreCase)) return;
 
         string combined = install.Output + Environment.NewLine + upgrade.Output;
@@ -350,7 +446,7 @@ internal sealed class MainForm : Form
             if (sw.Elapsed < TimeSpan.FromSeconds(2))
                 throw new InvalidOperationException(
                     "Pairing 視窗幾乎立刻關閉。這通常表示 Windows 執行環境 / Apple Mobile Device 支援有問題。\n\n" +
-                    "v2.1 已把 Rust CRT 靜態連結；如果仍發生，請把 PikminPilotSetup.log 給我。"
+                    "v2.2 已把 Rust CRT 靜態連結；如果仍發生，請把 PikminPilotSetup.log 給我。"
                 );
         }
         catch (Exception ex)
@@ -370,7 +466,12 @@ internal sealed class MainForm : Form
         return path;
     }
 
-    private static async Task<(int ExitCode, string Output)> RunCapture(string exe, IEnumerable<string> args, bool allowFailure, int timeoutMinutes = 2)
+    private static async Task<(int ExitCode, string Output)> RunCapture(
+        string exe,
+        IEnumerable<string> args,
+        bool allowFailure,
+        TimeSpan? timeout = null,
+        bool searchPath = false)
     {
         var psi = new ProcessStartInfo(exe)
         {
@@ -378,18 +479,19 @@ internal sealed class MainForm : Form
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             CreateNoWindow = true,
-            WorkingDirectory = Path.GetDirectoryName(exe) ?? BaseDir
+            WorkingDirectory = searchPath ? BaseDir : (Path.GetDirectoryName(exe) ?? BaseDir)
         };
         foreach (string arg in args) psi.ArgumentList.Add(arg);
         using var p = Process.Start(psi) ?? throw new InvalidOperationException($"Unable to launch {exe}");
         Task<string> stdoutTask = p.StandardOutput.ReadToEndAsync();
         Task<string> stderrTask = p.StandardError.ReadToEndAsync();
-        using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(timeoutMinutes));
+        TimeSpan limit = timeout ?? TimeSpan.FromMinutes(2);
+        using var cts = new CancellationTokenSource(limit);
         try { await p.WaitForExitAsync(cts.Token); }
         catch (OperationCanceledException)
         {
             try { p.Kill(entireProcessTree: true); } catch { }
-            throw new TimeoutException($"Tool timed out after {timeoutMinutes} minutes: {Path.GetFileName(exe)}");
+            throw new TimeoutException($"{Path.GetFileName(exe)} did not return within {limit.TotalSeconds:F0}s and was stopped. This usually means the Apple USB/usbmuxd backend is not responding.");
         }
         string output = (await stdoutTask) + Environment.NewLine + (await stderrTask);
         if (!allowFailure && p.ExitCode != 0) throw new InvalidOperationException(output);
