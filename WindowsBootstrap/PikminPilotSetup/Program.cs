@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.IO.Compression;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
@@ -55,7 +56,7 @@ internal sealed class MainForm : Form
 
     public MainForm()
     {
-        Text = "Pikmin Pilot Setup v2.2";
+        Text = "Pikmin Pilot Setup v2.3";
         Width = 820;
         Height = 650;
         StartPosition = FormStartPosition.CenterScreen;
@@ -235,29 +236,10 @@ internal sealed class MainForm : Form
 
     private async Task<List<string>> DetectDevices()
     {
-        // v2.2: USB discovery must never make the GUI look frozen.
-        // Use the standard idevice_id -l invocation once with a short hard timeout.
-        // If the bundled Rust detector cannot talk to Apple's usbmuxd on this PC,
-        // optionally fall back to an already-installed pymobiledevice3.
-        string exe = Tool("idevice_id.exe");
-        Log($"USB probe: {Path.GetFileName(exe)} -l (8s timeout)");
-
-        try
-        {
-            var result = await RunCapture(exe, new[] { "-l" }, allowFailure: true, timeout: TimeSpan.FromSeconds(8));
-            Log($"idevice_id exit={result.ExitCode} output={Compact(result.Output)}");
-            var ids = ParseUdidLines(result.Output);
-            if (ids.Count > 0) return ids;
-        }
-        catch (TimeoutException ex)
-        {
-            Log(ex.Message, error: true);
-        }
-        catch (Exception ex)
-        {
-            Log($"Bundled idevice_id failed: {ex.Message}", error: true);
-        }
-
+        // v2.3: prefer pymobiledevice3 when it is already installed. On the
+        // reference Windows machine this responds immediately while the bundled
+        // idevice_id backend can block in usbmuxd. Users without Python still
+        // fall back to the self-contained bundled detector.
         foreach (var python in new[] { "python.exe", "python", "py.exe", "py" })
         {
             try
@@ -265,14 +247,16 @@ internal sealed class MainForm : Form
                 string[] args = (python.Equals("py.exe", StringComparison.OrdinalIgnoreCase) || python.Equals("py", StringComparison.OrdinalIgnoreCase))
                     ? new[] { "-3", "-m", "pymobiledevice3", "usbmux", "list" }
                     : new[] { "-m", "pymobiledevice3", "usbmux", "list" };
-                Log($"USB fallback probe: {python} {string.Join(" ", args)} (10s timeout)");
-                var result = await RunCapture(python, args, allowFailure: true, timeout: TimeSpan.FromSeconds(10), searchPath: true);
-                if (result.ExitCode != 0) continue;
-                var ids = ParsePymobiledeviceJson(result.Output);
-                if (ids.Count > 0)
+                Log($"USB primary probe: {python} {string.Join(" ", args)} (6s timeout)");
+                var result = await RunCapture(python, args, allowFailure: true, timeout: TimeSpan.FromSeconds(6), searchPath: true);
+                if (result.ExitCode == 0)
                 {
-                    Log("USB device detected through pymobiledevice3 fallback.");
-                    return ids;
+                    var ids = ParsePymobiledeviceJson(result.Output);
+                    if (ids.Count > 0)
+                    {
+                        Log("USB device detected through pymobiledevice3.");
+                        return ids;
+                    }
                 }
             }
             catch (System.ComponentModel.Win32Exception)
@@ -285,8 +269,26 @@ internal sealed class MainForm : Form
             }
             catch (Exception ex)
             {
-                Log($"pymobiledevice3 fallback failed via {python}: {ex.Message}", error: true);
+                Log($"pymobiledevice3 probe failed via {python}: {ex.Message}", error: true);
             }
+        }
+
+        string exe = Tool("idevice_id.exe");
+        Log($"USB fallback probe: {Path.GetFileName(exe)} -l (6s timeout)");
+        try
+        {
+            var result = await RunCapture(exe, new[] { "-l" }, allowFailure: true, timeout: TimeSpan.FromSeconds(6));
+            Log($"idevice_id exit={result.ExitCode} output={Compact(result.Output)}");
+            var ids = ParseUdidLines(result.Output);
+            if (ids.Count > 0) return ids;
+        }
+        catch (TimeoutException ex)
+        {
+            Log(ex.Message, error: true);
+        }
+        catch (Exception ex)
+        {
+            Log($"Bundled idevice_id failed: {ex.Message}", error: true);
         }
 
         return new List<string>();
@@ -344,21 +346,54 @@ internal sealed class MainForm : Form
     {
         string local = Path.Combine(BaseDir, string.IsNullOrWhiteSpace(cfg.LocalIpaFile) ? "PikminPilot.ipa" : cfg.LocalIpaFile);
         if (File.Exists(local) && new FileInfo(local).Length > 100 * 1024)
+        {
+            ValidateHostIpa(local);
             return local;
+        }
 
         if (!string.IsNullOrWhiteSpace(cfg.IpaUrl))
-            return await DownloadIpa(cfg.IpaUrl!);
+        {
+            string downloaded = await DownloadIpa(cfg.IpaUrl!);
+            ValidateHostIpa(downloaded);
+            return downloaded;
+        }
 
         if (!string.IsNullOrWhiteSpace(cfg.BootstrapApiBase))
-            return await RequestRegisteredIpa(cfg, udid, deviceName);
+        {
+            string registered = await RequestRegisteredIpa(cfg, udid, deviceName);
+            ValidateHostIpa(registered);
+            return registered;
+        }
 
         string requestPath = Path.Combine(BaseDir, "device-request.txt");
         File.WriteAllText(requestPath, $"UDID={udid}{Environment.NewLine}NAME={deviceName}{Environment.NewLine}");
         throw new InvalidOperationException(
             "Setup 包裡沒有 PikminPilot.ipa，而且尚未設定 registration backend。\n\n" +
             $"此裝置 UDID 已寫入：{requestPath}\n\n" +
-            "如果這是你自己測試，請先讓 GitHub build-ios.yml 成功一次，再重新 build Full Windows Setup v2.2。"
+            "如果這是你自己測試，請先讓 GitHub build-ios.yml 成功一次，再重新 build Full Windows Setup v2.3。"
         );
+    }
+
+    private static void ValidateHostIpa(string ipa)
+    {
+        if (!File.Exists(ipa)) throw new FileNotFoundException("IPA not found", ipa);
+        using var zip = ZipFile.OpenRead(ipa);
+        bool hasHost = zip.Entries.Any(e => string.Equals(e.FullName, "Payload/PikminPilot.app/Info.plist", StringComparison.Ordinal));
+        bool runnerAtPayloadRoot = zip.Entries.Any(e => e.FullName.StartsWith("Payload/PikminPilotRunnerUITests-Runner.app/", StringComparison.Ordinal));
+        bool hasEmbeddedRunner = zip.Entries.Any(e => e.FullName.StartsWith("Payload/PikminPilot.app/", StringComparison.Ordinal)
+            && e.FullName.EndsWith("PikminPilotEmbeddedRunner.ipa", StringComparison.Ordinal));
+
+        if (!hasHost || runnerAtPayloadRoot)
+        {
+            throw new InvalidOperationException(
+                "Setup 取得的不是 Pikmin Pilot 主 IPA，而是 Runner-only / 錯誤 IPA。\n\n" +
+                "正確 IPA 必須包含 Payload/PikminPilot.app。請用 Full Windows Setup v2.3 重新打包。"
+            );
+        }
+        if (!hasEmbeddedRunner)
+        {
+            throw new InvalidOperationException("Pikmin Pilot 主 IPA 缺少 PikminPilotEmbeddedRunner.ipa；拒絕安裝不完整 package。");
+        }
     }
 
     private static async Task<string> RequestRegisteredIpa(SetupConfig cfg, string udid, string deviceName)
@@ -422,7 +457,7 @@ internal sealed class MainForm : Form
 
         string combined = install.Output + Environment.NewLine + upgrade.Output;
         if (combined.Contains("provision", StringComparison.OrdinalIgnoreCase) || combined.Contains("verification", StringComparison.OrdinalIgnoreCase))
-            throw new InvalidOperationException("IPA 被 iOS 拒絕。這台 UDID 很可能還沒包含在 App / Tunnel / XCTRunner provisioning profiles。\n\n" + combined);
+            throw new InvalidOperationException("IPA 被 iOS 拒絕。主 IPA 結構已驗證正確；如果錯誤仍是 0xe8008015，才表示目前簽名用的 App / Tunnel / XCTRunner provisioning profile 至少有一個不包含這台 UDID。\n\n" + combined);
         throw new InvalidOperationException("Pikmin Pilot IPA 安裝失敗。確認手機已解鎖、已 Trust、Apple Mobile Device 驅動可用。\n\n" + combined);
     }
 
@@ -446,7 +481,7 @@ internal sealed class MainForm : Form
             if (sw.Elapsed < TimeSpan.FromSeconds(2))
                 throw new InvalidOperationException(
                     "Pairing 視窗幾乎立刻關閉。這通常表示 Windows 執行環境 / Apple Mobile Device 支援有問題。\n\n" +
-                    "v2.2 已把 Rust CRT 靜態連結；如果仍發生，請把 PikminPilotSetup.log 給我。"
+                    "v2.3 已把 Rust CRT 靜態連結；如果仍發生，請把 PikminPilotSetup.log 給我。"
                 );
         }
         catch (Exception ex)
