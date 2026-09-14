@@ -11,8 +11,24 @@ targets:
   PikminPilot:
     type: application
     platform: iOS
+    # Stage 11.5.4.1: explicit 11.5.3-baseline source allowlist.
+    # Do NOT scan the whole PikminPilot/ directory: overwrite-style repo updates
+    # can leave 11.6.x files such as PhoneLocalPairingBootstrap.swift behind.
     sources:
-    - path: PikminPilot
+    - path: PikminPilot/ContentView.swift
+    - path: PikminPilot/DeveloperDiskImageStore.swift
+    - path: PikminPilot/FruitDetector.swift
+    - path: PikminPilot/IDeviceEngine.swift
+    - path: PikminPilot/ImageAutomationDetector.swift
+    - path: PikminPilot/NoVPNSelfTransportProbe.swift
+    - path: PikminPilot/PairingRecordStore.swift
+    - path: PikminPilot/PikminPilotApp.swift
+    - path: PikminPilot/PikminTunnelManager.swift
+    - path: PikminPilot/PilotIDeviceBridge.m
+    - path: PikminPilot/PilotOptions.swift
+    - path: PikminPilot/PilotTransport.swift
+    - path: PikminPilot/RunnerPackageStore.swift
+    - path: PikminPilot/Stage8FullLoopController.swift
     info:
       path: PikminPilot/Info.plist
     dependencies:
@@ -40,8 +56,8 @@ targets:
         - -lc++
         - -lz
         CODE_SIGN_STYLE: Manual
-        CURRENT_PROJECT_VERSION: '1154'
-        MARKETING_VERSION: '11.5.4'
+        CURRENT_PROJECT_VERSION: '11541'
+        MARKETING_VERSION: '11.5.4.1'
     scheme:
       testTargets:
       - PikminPilotRunnerUITests
@@ -51,7 +67,8 @@ targets:
     type: app-extension
     platform: iOS
     sources:
-    - path: PikminPilotTunnel
+    - path: PikminPilotTunnel/PacketTunnelProvider.swift
+    - path: PikminPilotTunnel/TunnelConstants.swift
     dependencies:
     - sdk: NetworkExtension.framework
     settings:
@@ -64,13 +81,13 @@ targets:
         SKIP_INSTALL: YES
         APPLICATION_EXTENSION_API_ONLY: YES
         CODE_SIGN_STYLE: Manual
-        CURRENT_PROJECT_VERSION: '1154'
-        MARKETING_VERSION: '11.5.4'
+        CURRENT_PROJECT_VERSION: '11541'
+        MARKETING_VERSION: '11.5.4.1'
   PikminPilotRunnerUITests:
     type: bundle.ui-testing
     platform: iOS
     sources:
-    - path: PikminPilotRunnerUITests
+    - path: PikminPilotRunnerUITests/PikminPilotRunnerUITests.swift
     dependencies:
     - target: PikminPilot
     settings:
