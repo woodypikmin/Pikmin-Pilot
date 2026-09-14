@@ -15,6 +15,86 @@ final class ImageAutomationDetector {
         )
     }
 
+
+    /// Returns the live game-content rectangle in screenshot pixels. On normal
+    /// iPhones this is usually the full frame. On iPad/iPhone-compatibility
+    /// layouts it trims persistent near-black letterbox margins before any
+    /// geometry is mapped into XCTest's full-screen normalized coordinates.
+    static func activeContentRect(in image: UIImage) -> CGRect {
+        guard let (w, h, data) = FruitDetector.rawPixels(image), w > 0, h > 0 else {
+            return CGRect(origin: .zero, size: image.size)
+        }
+
+        let sampleStep = max(2, min(w, h) / 220)
+
+        func isActive(_ x: Int, _ y: Int) -> Bool {
+            let value = FruitDetector.hsv(FruitDetector.pixel(data, width: w, x: x, y: y))
+            return value.v > 0.085 || value.s > 0.10
+        }
+
+        var rowActive = [Bool](repeating: false, count: h)
+        for y in stride(from: 0, to: h, by: sampleStep) {
+            var active = 0
+            var total = 0
+            for x in stride(from: 0, to: w, by: sampleStep) {
+                if isActive(x, y) { active += 1 }
+                total += 1
+            }
+            let on = total > 0 && Double(active) / Double(total) > 0.16
+            for yy in y..<min(h, y + sampleStep) { rowActive[yy] = on }
+        }
+
+        func longestRun(_ values: [Bool]) -> Range<Int>? {
+            var best: Range<Int>?
+            var start: Int?
+            for i in 0...values.count {
+                let on = i < values.count ? values[i] : false
+                if on, start == nil { start = i }
+                if !on, let s = start {
+                    let r = s..<i
+                    if best == nil || r.count > best!.count { best = r }
+                    start = nil
+                }
+            }
+            return best
+        }
+
+        guard let yr = longestRun(rowActive), yr.count >= Int(Double(h) * 0.55) else {
+            return CGRect(x: 0, y: 0, width: w, height: h)
+        }
+
+        var colActive = [Bool](repeating: false, count: w)
+        let yStep = max(sampleStep, yr.count / 140)
+        for x in stride(from: 0, to: w, by: sampleStep) {
+            var active = 0
+            var total = 0
+            for y in stride(from: yr.lowerBound, to: yr.upperBound, by: yStep) {
+                if isActive(x, y) { active += 1 }
+                total += 1
+            }
+            let on = total > 0 && Double(active) / Double(total) > 0.16
+            for xx in x..<min(w, x + sampleStep) { colActive[xx] = on }
+        }
+
+        guard let xr = longestRun(colActive), xr.count >= Int(Double(w) * 0.45) else {
+            return CGRect(x: 0, y: yr.lowerBound, width: w, height: yr.count)
+        }
+
+        let rect = CGRect(x: xr.lowerBound, y: yr.lowerBound, width: xr.count, height: yr.count)
+        if rect.width < Double(w) * 0.45 || rect.height < Double(h) * 0.55 {
+            return CGRect(x: 0, y: 0, width: w, height: h)
+        }
+        return rect
+    }
+
+    static func contentPoint(x: Double, y: Double, in image: UIImage) -> CGPoint {
+        let rect = activeContentRect(in: image)
+        return CGPoint(
+            x: rect.minX + rect.width * x,
+            y: rect.minY + rect.height * y
+        )
+    }
+
     static func detectExpeditionButton(
         in image: UIImage
     ) -> CGPoint? {
@@ -248,71 +328,80 @@ final class ImageAutomationDetector {
             return nil
         }
 
-        // Keep the already-proven dynamic detector for pink whenever possible.
-        if type == .pink, let dynamic = detectPinkFilter(in: image) {
-            return dynamic
-        }
+        let viewport = activeContentRect(in: image)
+        let minDim = max(1.0, min(viewport.width, viewport.height))
+        let x0 = max(0, Int(viewport.minX + viewport.width * 0.12))
+        let x1 = min(w, Int(viewport.maxX - viewport.width * 0.03))
+        let y0 = max(0, Int(viewport.minY + viewport.height * 0.22))
+        let y1 = min(h, Int(viewport.minY + viewport.height * 0.66))
 
-        // The user's real iPhone screenshots show a stable eight-chip filter
-        // row after the existing reveal swipe. White and rock are intentionally
-        // hard to segment by hue, so first verify that the *row* is present via
-        // several colored anchor chips, then use the calibrated per-type center.
-        let y0 = max(0, Int(Double(h) * 0.395))
-        let y1 = min(h, Int(Double(h) * 0.455))
-        let x0 = max(0, Int(Double(w) * 0.30))
-        let x1 = min(w, Int(Double(w) * 0.95))
-
-        var colorful = 0
-        var sampled = 0
-        for y in stride(from: y0, to: y1, by: 2) {
-            for x in stride(from: x0, to: x1, by: 2) {
-                let value = FruitDetector.hsv(
-                    FruitDetector.pixel(data, width: w, x: x, y: y)
-                )
-                if value.s > 0.20 && value.v > 0.55 {
-                    colorful += 1
-                }
-                sampled += 1
-            }
-        }
-
-        guard sampled > 0,
-              Double(colorful) / Double(sampled) > 0.010 else {
-            return nil
-        }
-
-        let expected = CGPoint(
-            x: CGFloat(w) * type.filterNormalizedX,
-            y: CGFloat(h) * type.filterNormalizedY
-        )
-
-        // Local contrast check prevents dispatching the calibrated coordinate
-        // if a completely different screen happens to have colorful content in
-        // the same horizontal band.
-        let radiusX = max(6, Int(Double(w) * 0.030))
-        let radiusY = max(6, Int(Double(h) * 0.017))
-        let cx = min(w - 1, max(0, Int(expected.x)))
-        let cy = min(h - 1, max(0, Int(expected.y)))
-        var nonWhite = 0
-        var localTotal = 0
-
-        for y in max(0, cy - radiusY)...min(h - 1, cy + radiusY) {
-            for x in max(0, cx - radiusX)...min(w - 1, cx + radiusX) {
+        var mask = [Bool](repeating: false, count: w * h)
+        for y in y0..<y1 {
+            for x in x0..<x1 {
                 let p = FruitDetector.pixel(data, width: w, x: x, y: y)
-                let v = FruitDetector.hsv(p)
-                if v.v < 0.965 || v.s > 0.035 {
-                    nonWhite += 1
-                }
-                localTotal += 1
+                let hsv = FruitDetector.hsv(p)
+                let magenta = hsv.h >= 278 && hsv.h <= 332 &&
+                    hsv.s >= 0.16 && hsv.v >= 0.58 &&
+                    Int(p.r) > Int(p.g) + 22 && Int(p.b) > Int(p.g) + 8
+                if magenta { mask[y * w + x] = true }
             }
         }
 
-        guard localTotal > 0,
-              Double(nonWhite) / Double(localTotal) > 0.08 else {
+        let candidates = componentCenters(mask: mask, width: w, height: h)
+            .compactMap { rect, count -> (CGPoint, CGRect, Int)? in
+                let wf = rect.width / minDim
+                let hf = rect.height / minDim
+                guard count >= Int(minDim * minDim * 0.00012) else { return nil }
+                guard wf >= 0.020 && wf <= 0.115 else { return nil }
+                guard hf >= 0.012 && hf <= 0.090 else { return nil }
+                return (CGPoint(x: rect.midX, y: rect.midY), rect, count)
+            }
+
+        // Purple and pink are both magenta-ish. In the live filter row they
+        // form the most useful pair of horizontally aligned magenta anchors.
+        // Their separation spans two chip slots (purple, white, pink), which
+        // gives us the actual row spacing on this exact device/layout.
+        var bestPair: (left: CGPoint, right: CGPoint, score: Double)?
+        for i in 0..<candidates.count {
+            for j in (i + 1)..<candidates.count {
+                var a = candidates[i].0
+                var b = candidates[j].0
+                if a.x > b.x { swap(&a, &b) }
+                let dx = b.x - a.x
+                let dy = abs(b.y - a.y)
+                guard dx >= viewport.width * 0.08 && dx <= viewport.width * 0.30 else { continue }
+                guard dy <= max(minDim * 0.045, 8) else { continue }
+                let spacingScore = abs(dx / viewport.width - 0.166)
+                let verticalScore = dy / max(1, viewport.height)
+                let middleBias = abs(((a.y + b.y) * 0.5 - viewport.midY) / max(1, viewport.height)) * 0.12
+                let score = spacingScore + verticalScore * 2.5 + middleBias
+                if bestPair == nil || score < bestPair!.score {
+                    bestPair = (a, b, score)
+                }
+            }
+        }
+
+        guard let anchors = bestPair else {
             return nil
         }
 
-        return expected
+        let purple = anchors.left
+        let pink = anchors.right
+        let spacing = (pink.x - purple.x) * 0.5
+        let rowY = (purple.y + pink.y) * 0.5
+
+        switch type {
+        case .purple:
+            return CGPoint(x: purple.x, y: rowY)
+        case .white:
+            return CGPoint(x: purple.x + spacing, y: rowY)
+        case .pink:
+            return CGPoint(x: pink.x, y: rowY)
+        case .rock:
+            let x = pink.x + spacing
+            guard x < viewport.maxX - max(2, minDim * 0.01) else { return nil }
+            return CGPoint(x: x, y: rowY)
+        }
     }
 
     static func detectActiveGO(
@@ -609,62 +698,50 @@ final class ImageAutomationDetector {
             return nil
         }
 
-        // Wide lower-left ROI for the carrying close button. The old strict
-        // detector is intentionally kept as the first choice. This fallback
-        // tolerates layout shifts while still requiring a green, roughly
-        // button-sized connected component, so the normal WHITE list X is not
-        // eligible.
-        let x0 = max(0, Int(Double(w) * 0.018))
-        let x1 = min(w, Int(Double(w) * 0.235))
-        let y0 = max(0, Int(Double(h) * 0.815))
-        let y1 = min(h, Int(Double(h) * 0.985))
+        let viewport = activeContentRect(in: image)
+        let x0 = max(0, Int(viewport.minX))
+        let x1 = min(w, Int(viewport.maxX))
+        let y0 = max(0, Int(viewport.minY + viewport.height * 0.48))
+        let y1 = min(h, Int(viewport.maxY))
 
         var mask = [Bool](repeating: false, count: w * h)
         for y in y0..<y1 {
             for x in x0..<x1 {
-                let p = FruitDetector.pixel(data, width: w, x: x, y: y)
-                let hsv = FruitDetector.hsv(p)
-
-                // Slightly wider than the strict Stage 8.1 hue/saturation
-                // gate because anti-aliasing and display capture can reduce
-                // saturation around the circular edge.
+                let hsv = FruitDetector.hsv(FruitDetector.pixel(data, width: w, x: x, y: y))
                 if hsv.h >= 62 && hsv.h <= 215 && hsv.s >= 0.09 && hsv.v >= 0.12 {
                     mask[y * w + x] = true
                 }
             }
         }
 
-        let expected = CGPoint(
-            x: Double(w) * 0.096,
-            y: Double(h) * 0.917
-        )
-
+        let contentArea = max(1.0, viewport.width * viewport.height)
         let candidates = componentCenters(mask: mask, width: w, height: h)
             .compactMap { rect, count -> (CGPoint, Double)? in
-                let minCount = Int(Double(w * h) * 0.00028)
-                guard count >= minCount else { return nil }
-
-                let wf = rect.width / Double(w)
-                let hf = rect.height / Double(h)
-                guard wf >= 0.035 && wf <= 0.18 else { return nil }
-                guard hf >= 0.018 && hf <= 0.095 else { return nil }
+                guard count >= Int(contentArea * 0.00020) else { return nil }
+                let wf = rect.width / max(1, viewport.width)
+                let hf = rect.height / max(1, viewport.height)
+                guard wf >= 0.025 && wf <= 0.20 else { return nil }
+                guard hf >= 0.015 && hf <= 0.16 else { return nil }
+                let aspect = rect.width / max(1, rect.height)
+                guard aspect >= 0.50 && aspect <= 1.85 else { return nil }
 
                 let center = CGPoint(x: rect.midX, y: rect.midY)
-                let dx = (center.x - expected.x) / Double(w)
-                let dy = (center.y - expected.y) / Double(h)
-                let distance = sqrt(dx * dx + dy * dy)
+                let nx = (center.x - viewport.minX) / max(1, viewport.width)
+                let ny = (center.y - viewport.minY) / max(1, viewport.height)
+                guard ny >= 0.52 else { return nil }
 
-                // Prefer a component close to the known lower-left control,
-                // with a modest bonus for larger green fill.
-                let areaBonus = min(0.05, Double(count) / Double(w * h))
-                return (center, distance - areaBonus)
+                // Prefer compact/circular green controls and, only as a weak
+                // tie-breaker, the lower-left portion where the carrying close
+                // control normally lives. There is no calibrated absolute tap.
+                let shapePenalty = abs(log(max(0.001, aspect)))
+                let locationPenalty = nx * 0.20 + abs(ny - 0.88) * 0.08
+                let areaBonus = min(0.10, Double(count) / contentArea * 8.0)
+                return (center, shapePenalty + locationPenalty - areaBonus)
             }
             .sorted { $0.1 < $1.1 }
 
-        guard let best = candidates.first, best.1 < 0.13 else {
-            return nil
-        }
-        return best.0
+        return candidates.first?.0
     }
+
 
 }

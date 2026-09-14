@@ -29,19 +29,17 @@ enum PilotPikminType: String, CaseIterable, Identifiable {
         }
     }
 
-    /// Calibrated against the user's real iPhone selection screenshots after
-    /// the existing filter-row reveal swipe. The row has eight evenly-spaced
-    /// circles; these are the four types Pikmin Pilot currently exposes.
-    var filterNormalizedX: CGFloat {
+    /// Logical order in the live filter row. Stage 11.5 no longer converts
+    /// these to fixed screen coordinates; ImageAutomationDetector derives the
+    /// actual row spacing from the purple/pink anchors in each screenshot.
+    var filterRowOrdinal: Int {
         switch self {
-        case .purple: return 0.5894
-        case .white:  return 0.6727
-        case .pink:   return 0.7560
-        case .rock:   return 0.8395
+        case .purple: return 4
+        case .white:  return 5
+        case .pink:   return 6
+        case .rock:   return 7
         }
     }
-
-    var filterNormalizedY: CGFloat { 0.4226 }
 }
 
 enum PilotCargoMode: String, CaseIterable, Identifiable {

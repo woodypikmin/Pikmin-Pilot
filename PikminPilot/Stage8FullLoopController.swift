@@ -332,8 +332,9 @@ final class Stage8FullLoopController: ObservableObject {
             }
 
             if directionDown {
-                try await swipe(
+                try await swipeInContent(
                     engine: engine,
+                    image: image,
                     fromX: 0.52,
                     fromY: 0.77,
                     toX: 0.52,
@@ -342,8 +343,9 @@ final class Stage8FullLoopController: ObservableObject {
                     stage: "fruit-list-down"
                 )
             } else {
-                try await swipe(
+                try await swipeInContent(
                     engine: engine,
+                    image: image,
                     fromX: 0.52,
                     fromY: 0.35,
                     toX: 0.52,
@@ -414,8 +416,10 @@ final class Stage8FullLoopController: ObservableObject {
         await pause(fastMode ? 0.18 : 0.28)
 
         emit("ROUND \(round) • reveal Pikmin filter row • target=\(pikminType.shortName)")
-        try await swipe(
+        let revealFrame = try await capture(engine: engine, tag: "pikmin-filter-reveal-geometry")
+        try await swipeInContent(
             engine: engine,
+            image: revealFrame,
             fromX: 0.88,
             fromY: 0.432,
             toX: 0.43,
@@ -440,8 +444,9 @@ final class Stage8FullLoopController: ObservableObject {
 
             emit("ROUND \(round) • \(pikminType.shortName) filter miss attempt \(attempt + 1)/5")
             if attempt < 4 {
-                try await swipe(
+                try await swipeInContent(
                     engine: engine,
+                    image: image,
                     fromX: 0.88,
                     fromY: 0.432,
                     toX: 0.43,
@@ -602,8 +607,8 @@ final class Stage8FullLoopController: ObservableObject {
     ) async throws -> (point: CGPoint, image: UIImage, mode: String)? {
         // Critical section: DO NOT foreground Pilot here. We just tapped GO and
         // must leave Pikmin untouched until the carrying overlay appears.
-        // Try the visual detectors briefly, then use the coordinate measured
-        // from the user's real 942x2048 carrying screenshot.
+        // Stage 11.5 fails closed if the live green-X cannot be detected; it no
+        // longer taps a coordinate calibrated from one specific phone.
         for index in 0..<8 {
             try checkCancelled()
 
@@ -620,17 +625,8 @@ final class Stage8FullLoopController: ObservableObject {
                 return (point, image, "broad")
             }
 
-            if index >= 4 {
-                let fixedPoint = CGPoint(
-                    x: Double(image.cgImage?.width ?? 1) * 0.0971,
-                    y: Double(image.cgImage?.height ?? 1) * 0.9144
-                )
-                emit("ROUND \(round) • green X visual miss → calibrated fallback x=0.0971 y=0.9144")
-                return (fixedPoint, image, "fixed@0.0971,0.9144")
-            }
-
-            if index == 0 || index == 2 {
-                emit("ROUND \(round) • carrying green X scan attempt \(index + 1)/8")
+            if index == 0 || index == 2 || index == 5 {
+                emit("ROUND \(round) • carrying green X adaptive scan attempt \(index + 1)/8")
             }
             await pause(0.34)
         }
@@ -733,6 +729,41 @@ final class Stage8FullLoopController: ObservableObject {
         guard result.ok else {
             throw LoopError("phase=\(stage)-tap • \(result.message)")
         }
+    }
+
+    private func swipeInContent(
+        engine: IDeviceEngine,
+        image: UIImage,
+        fromX: Double,
+        fromY: Double,
+        toX: Double,
+        toY: Double,
+        duration: Double,
+        stage: String
+    ) async throws {
+        guard let cg = image.cgImage else {
+            throw LoopError("phase=\(stage) • screenshot has no CGImage for adaptive swipe")
+        }
+        let viewport = ImageAutomationDetector.activeContentRect(in: image)
+        func normalized(_ x: Double, _ y: Double) -> (Double, Double) {
+            let px = viewport.minX + viewport.width * x
+            let py = viewport.minY + viewport.height * y
+            return (
+                min(1, max(0, px / Double(cg.width))),
+                min(1, max(0, py / Double(cg.height)))
+            )
+        }
+        let a = normalized(fromX, fromY)
+        let b = normalized(toX, toY)
+        try await swipe(
+            engine: engine,
+            fromX: a.0,
+            fromY: a.1,
+            toX: b.0,
+            toY: b.1,
+            duration: duration,
+            stage: stage
+        )
     }
 
     private func swipe(

@@ -48,7 +48,10 @@ final class PikminPilotRunnerUITests: XCTestCase {
         }
 
         if command == "select12" {
-            selectPikminGrid(in: app, count: 12, interTapDelayUS: 35_000)
+            guard selectPikminGrid(in: app, count: 12, interTapDelayUS: 35_000) else {
+                XCTFail("select12: adaptive Pikmin grid detection failed")
+                return
+            }
             XCTAssertEqual(app.state, .runningForeground)
             usleep(120_000)
             return
@@ -85,7 +88,6 @@ final class PikminPilotRunnerUITests: XCTestCase {
             let goPollDelay: useconds_t = fastMode ? 55_000 : 80_000
             let afterGO: useconds_t = fastMode ? 380_000 : 520_000
             let closePollDelay: useconds_t = fastMode ? 75_000 : 120_000
-            let closeFallbackDelay: useconds_t = fastMode ? 250_000 : 420_000
             let afterClose: useconds_t = fastMode ? 110_000 : 180_000
             let handoffSettle: useconds_t = fastMode ? 100_000 : 160_000
 
@@ -94,7 +96,10 @@ final class PikminPilotRunnerUITests: XCTestCase {
             ).tap()
             usleep(filterSettle)
 
-            selectPikminGrid(in: app, count: pikminCount, interTapDelayUS: interTap)
+            guard selectPikminGrid(in: app, count: pikminCount, interTapDelayUS: interTap) else {
+                XCTFail("dispatchtail: adaptive Pikmin grid detection failed")
+                return
+            }
             usleep(afterSelection)
 
             var goPoint: CGPoint?
@@ -116,14 +121,11 @@ final class PikminPilotRunnerUITests: XCTestCase {
                 withNormalizedOffset: CGVector(dx: goPoint.x, dy: goPoint.y)
             ).tap()
 
-            // XCUIScreen screenshots are relatively expensive. The user's real
-            // device already established the carrying-close center at
-            // (0.0971, 0.9144), so only do two quick visual confirmations and
-            // then use the stage-gated calibrated fallback. This keeps the tail
-            // comfortably inside one iOS finite background window.
+            // Stage 11.5: the carrying-close point must come from the live
+            // screenshot. Never force-tap a coordinate calibrated on one phone.
             usleep(afterGO)
             var closePoint: CGPoint?
-            for _ in 0..<2 {
+            for _ in 0..<6 {
                 let shot = XCUIScreen.main.screenshot().image
                 if let point = detectCarryingClose(in: shot) {
                     closePoint = point
@@ -132,13 +134,13 @@ final class PikminPilotRunnerUITests: XCTestCase {
                 usleep(closePollDelay)
             }
 
-            if closePoint == nil {
-                usleep(closeFallbackDelay)
-                closePoint = CGPoint(x: 0.0971, y: 0.9144)
+            guard let closePoint else {
+                XCTFail("dispatchtail: carrying green X not detected on live layout")
+                return
             }
 
             app.coordinate(
-                withNormalizedOffset: CGVector(dx: closePoint!.x, dy: closePoint!.y)
+                withNormalizedOffset: CGVector(dx: closePoint.x, dy: closePoint.y)
             ).tap()
             usleep(afterClose)
 
@@ -212,44 +214,115 @@ final class PikminPilotRunnerUITests: XCTestCase {
         usleep(120_000)
     }
 
+    @discardableResult
     private func selectPikminGrid(
         in app: XCUIApplication,
         count: Int,
         interTapDelayUS: useconds_t
-    ) {
-        let points: [(Double, Double)] = [
-            (112.0 / 868.0,  950.0 / 1836.0),
-            (272.0 / 868.0,  950.0 / 1836.0),
-            (427.0 / 868.0,  950.0 / 1836.0),
-            (583.0 / 868.0,  950.0 / 1836.0),
-            (737.0 / 868.0,  950.0 / 1836.0),
-            (112.0 / 868.0, 1215.0 / 1836.0),
-            (272.0 / 868.0, 1215.0 / 1836.0),
-            (427.0 / 868.0, 1215.0 / 1836.0),
-            (583.0 / 868.0, 1215.0 / 1836.0),
-            (737.0 / 868.0, 1215.0 / 1836.0),
-            (112.0 / 868.0, 1470.0 / 1836.0),
-            (272.0 / 868.0, 1470.0 / 1836.0),
-        ]
+    ) -> Bool {
+        let shot = XCUIScreen.main.screenshot().image
+        guard let points = detectPikminSelectionGrid(in: shot), points.count >= min(12, max(2, count)) else {
+            return false
+        }
 
-        for (px, py) in points.prefix(min(12, max(2, count))) {
+        for point in points.prefix(min(12, max(2, count))) {
             app.coordinate(
-                withNormalizedOffset: CGVector(dx: px, dy: py)
+                withNormalizedOffset: CGVector(dx: point.x, dy: point.y)
             ).tap()
             usleep(interTapDelayUS)
         }
+        return true
+    }
+
+    /// Builds a scalable 5-column selection lattice inside the *live* game
+    /// viewport, then locally refines every slot to the strongest visual center
+    /// in that neighborhood. The old 868x1836 pixel taps are no longer used.
+    private func detectPikminSelectionGrid(in image: UIImage) -> [CGPoint]? {
+        guard let (w, h, data) = rawPixels(image) else { return nil }
+        let viewport = activeContentRect(width: w, height: h, data: data)
+        guard viewport.width > 0, viewport.height > 0 else { return nil }
+
+        let columns = [0.129, 0.313, 0.492, 0.672, 0.849]
+        let rows = [0.517, 0.662, 0.801]
+        let searchX = viewport.width * 0.055
+        let searchY = viewport.height * 0.040
+        let step = max(3, Int(min(viewport.width, viewport.height) / 180.0))
+        let patchRadius = max(5, Int(min(viewport.width, viewport.height) * 0.018))
+
+        func visualScore(_ cx: Int, _ cy: Int) -> Double {
+            let minX = max(1, cx - patchRadius)
+            let maxX = min(w - 2, cx + patchRadius)
+            let minY = max(1, cy - patchRadius)
+            let maxY = min(h - 2, cy + patchRadius)
+            guard minX < maxX, minY < maxY else { return -1 }
+
+            var score = 0.0
+            var samples = 0
+            let localStep = max(2, patchRadius / 5)
+            for y in stride(from: minY, through: maxY, by: localStep) {
+                for x in stride(from: minX, through: maxX, by: localStep) {
+                    let p = pixel(data, width: w, x: x, y: y)
+                    let v = hsv(p)
+                    let pr = pixel(data, width: w, x: min(w - 1, x + 1), y: y)
+                    let pd = pixel(data, width: w, x: x, y: min(h - 1, y + 1))
+                    let lum = (Double(p.r) + Double(p.g) + Double(p.b)) / 765.0
+                    let lumR = (Double(pr.r) + Double(pr.g) + Double(pr.b)) / 765.0
+                    let lumD = (Double(pd.r) + Double(pd.g) + Double(pd.b)) / 765.0
+                    let edge = abs(lum - lumR) + abs(lum - lumD)
+                    score += v.s * 0.70 + edge * 1.80 + min(v.v, 1.0) * 0.10
+                    samples += 1
+                }
+            }
+            return samples > 0 ? score / Double(samples) : -1
+        }
+
+        var result: [CGPoint] = []
+        for row in rows {
+            for column in columns {
+                let seedX = viewport.minX + viewport.width * column
+                let seedY = viewport.minY + viewport.height * row
+                var best = CGPoint(x: seedX, y: seedY)
+                var bestScore = -Double.infinity
+
+                var cy = Int(seedY - searchY)
+                while cy <= Int(seedY + searchY) {
+                    var cx = Int(seedX - searchX)
+                    while cx <= Int(seedX + searchX) {
+                        if cx >= Int(viewport.minX), cx < Int(viewport.maxX),
+                           cy >= Int(viewport.minY), cy < Int(viewport.maxY) {
+                            let score = visualScore(cx, cy)
+                            if score > bestScore {
+                                bestScore = score
+                                best = CGPoint(x: cx, y: cy)
+                            }
+                        }
+                        cx += step
+                    }
+                    cy += step
+                }
+
+                result.append(CGPoint(
+                    x: best.x / Double(w),
+                    y: best.y / Double(h)
+                ))
+            }
+        }
+
+        return result
     }
 
     // Returns normalized coordinates for the warm active GO component.
     private func detectActiveGO(in image: UIImage) -> CGPoint? {
         guard let (w, h, data) = rawPixels(image) else { return nil }
-
-        let x0 = Int(Double(w) * 0.60)
-        let y0 = Int(Double(h) * 0.76)
+        let viewport = activeContentRect(width: w, height: h, data: data)
+        let x0 = max(0, Int(viewport.minX + viewport.width * 0.42))
+        let x1 = min(w, Int(viewport.maxX))
+        let y0 = max(0, Int(viewport.minY + viewport.height * 0.58))
+        let y1 = min(h, Int(viewport.maxY))
         var mask = [Bool](repeating: false, count: w * h)
 
-        for py in y0..<h {
-            for px in x0..<w {
+        for py in y0..<y1 {
+            for px in x0..<x1 {
                 let value = hsv(pixel(data, width: w, x: px, y: py))
                 let warmHue = value.h < 60 || value.h > 336
                 if warmHue && value.s > 0.27 && value.v > 0.56 {
@@ -258,19 +331,14 @@ final class PikminPilotRunnerUITests: XCTestCase {
             }
         }
 
-        let minCount = Int(Double(w * h) * 0.0010)
+        let contentArea = max(1.0, viewport.width * viewport.height)
         let candidates = connectedComponents(width: w, height: h, mask: mask)
-            .compactMap { rect, count -> (Int, CGPoint)? in
-                guard count >= minCount else { return nil }
-                guard rect.width >= Double(w) * 0.07 else { return nil }
-                guard rect.height >= Double(h) * 0.04 else { return nil }
-                return (
-                    count,
-                    CGPoint(
-                        x: rect.midX / Double(w),
-                        y: rect.midY / Double(h)
-                    )
-                )
+            .compactMap { rect, count -> (Double, CGPoint)? in
+                guard count >= Int(contentArea * 0.00075) else { return nil }
+                guard rect.width >= viewport.width * 0.06 else { return nil }
+                guard rect.height >= viewport.height * 0.025 else { return nil }
+                let center = CGPoint(x: rect.midX / Double(w), y: rect.midY / Double(h))
+                return (Double(count), center)
             }
             .sorted { $0.0 > $1.0 }
 
@@ -282,69 +350,101 @@ final class PikminPilotRunnerUITests: XCTestCase {
     // color check, so the normal WHITE list close button is not accepted.
     private func detectCarryingClose(in image: UIImage) -> CGPoint? {
         guard let (w, h, data) = rawPixels(image) else { return nil }
+        let viewport = activeContentRect(width: w, height: h, data: data)
+        let x0 = max(0, Int(viewport.minX))
+        let x1 = min(w, Int(viewport.maxX))
+        let y0 = max(0, Int(viewport.minY + viewport.height * 0.48))
+        let y1 = min(h, Int(viewport.maxY))
+        var mask = [Bool](repeating: false, count: w * h)
 
-        let expectedX = Double(w) * 0.0971
-        let expectedY = Double(h) * 0.9144
-        let radius = Double(w) * 0.055
-        let searchDX = Int(Double(w) * 0.035)
-        let searchDY = Int(Double(h) * 0.025)
-        let stepX = max(2, Int(Double(w) * 0.006))
-        let stepY = max(2, Int(Double(h) * 0.006))
-
-        var bestPoint: CGPoint?
-        var bestScore = -999.0
-        var cy = Int(expectedY) - searchDY
-
-        while cy <= Int(expectedY) + searchDY {
-            var cx = Int(expectedX) - searchDX
-
-            while cx <= Int(expectedX) + searchDX {
-                var green = 0
-                var white = 0
-                var total = 0
-                let rr = radius * 0.82
-
-                let minX = max(0, Int(Double(cx) - rr))
-                let maxX = min(w - 1, Int(Double(cx) + rr))
-                let minY = max(0, Int(Double(cy) - rr))
-                let maxY = min(h - 1, Int(Double(cy) + rr))
-
-                for py in minY...maxY {
-                    for px in minX...maxX {
-                        let dx = Double(px - cx)
-                        let dy = Double(py - cy)
-                        if dx * dx + dy * dy > rr * rr { continue }
-
-                        let value = hsv(pixel(data, width: w, x: px, y: py))
-                        if value.h > 70 && value.h < 200 && value.s > 0.14 && value.v > 0.14 {
-                            green += 1
-                        }
-                        if value.s < 0.18 && value.v > 0.84 {
-                            white += 1
-                        }
-                        total += 1
-                    }
+        for y in y0..<y1 {
+            for x in x0..<x1 {
+                let value = hsv(pixel(data, width: w, x: x, y: y))
+                if value.h >= 62 && value.h <= 215 && value.s >= 0.09 && value.v >= 0.12 {
+                    mask[y * w + x] = true
                 }
-
-                if total > 0 {
-                    let greenFraction = Double(green) / Double(total)
-                    let whiteFraction = Double(white) / Double(total)
-                    let score = greenFraction - whiteFraction * 0.50
-                    if greenFraction > 0.30 && whiteFraction < 0.45 && score > bestScore {
-                        bestScore = score
-                        bestPoint = CGPoint(
-                            x: Double(cx) / Double(w),
-                            y: Double(cy) / Double(h)
-                        )
-                    }
-                }
-
-                cx += stepX
             }
-            cy += stepY
         }
 
-        return bestPoint
+        let contentArea = max(1.0, viewport.width * viewport.height)
+        let candidates = connectedComponents(width: w, height: h, mask: mask)
+            .compactMap { rect, count -> (CGPoint, Double)? in
+                guard count >= Int(contentArea * 0.00020) else { return nil }
+                let wf = rect.width / max(1, viewport.width)
+                let hf = rect.height / max(1, viewport.height)
+                guard wf >= 0.025 && wf <= 0.20 else { return nil }
+                guard hf >= 0.015 && hf <= 0.16 else { return nil }
+                let aspect = rect.width / max(1, rect.height)
+                guard aspect >= 0.50 && aspect <= 1.85 else { return nil }
+
+                let center = CGPoint(x: rect.midX, y: rect.midY)
+                let nx = (center.x - viewport.minX) / max(1, viewport.width)
+                let ny = (center.y - viewport.minY) / max(1, viewport.height)
+                guard ny >= 0.52 else { return nil }
+
+                let shapePenalty = abs(log(max(0.001, aspect)))
+                let locationPenalty = nx * 0.20 + abs(ny - 0.88) * 0.08
+                let areaBonus = min(0.10, Double(count) / contentArea * 8.0)
+                return (
+                    CGPoint(x: center.x / Double(w), y: center.y / Double(h)),
+                    shapePenalty + locationPenalty - areaBonus
+                )
+            }
+            .sorted { $0.1 < $1.1 }
+
+        return candidates.first?.0
+    }
+
+    private func activeContentRect(width w: Int, height h: Int, data: [UInt8]) -> CGRect {
+        let sampleStep = max(2, min(w, h) / 220)
+        func isActive(_ x: Int, _ y: Int) -> Bool {
+            let value = hsv(pixel(data, width: w, x: x, y: y))
+            return value.v > 0.085 || value.s > 0.10
+        }
+        func longestRun(_ values: [Bool]) -> Range<Int>? {
+            var best: Range<Int>?
+            var start: Int?
+            for i in 0...values.count {
+                let on = i < values.count ? values[i] : false
+                if on, start == nil { start = i }
+                if !on, let s = start {
+                    let r = s..<i
+                    if best == nil || r.count > best!.count { best = r }
+                    start = nil
+                }
+            }
+            return best
+        }
+
+        var rows = [Bool](repeating: false, count: h)
+        for y in stride(from: 0, to: h, by: sampleStep) {
+            var active = 0, total = 0
+            for x in stride(from: 0, to: w, by: sampleStep) {
+                if isActive(x, y) { active += 1 }
+                total += 1
+            }
+            let on = total > 0 && Double(active) / Double(total) > 0.16
+            for yy in y..<min(h, y + sampleStep) { rows[yy] = on }
+        }
+        guard let yr = longestRun(rows), yr.count >= Int(Double(h) * 0.55) else {
+            return CGRect(x: 0, y: 0, width: w, height: h)
+        }
+
+        var cols = [Bool](repeating: false, count: w)
+        let yStep = max(sampleStep, yr.count / 140)
+        for x in stride(from: 0, to: w, by: sampleStep) {
+            var active = 0, total = 0
+            for y in stride(from: yr.lowerBound, to: yr.upperBound, by: yStep) {
+                if isActive(x, y) { active += 1 }
+                total += 1
+            }
+            let on = total > 0 && Double(active) / Double(total) > 0.16
+            for xx in x..<min(w, x + sampleStep) { cols[xx] = on }
+        }
+        guard let xr = longestRun(cols), xr.count >= Int(Double(w) * 0.45) else {
+            return CGRect(x: 0, y: yr.lowerBound, width: w, height: yr.count)
+        }
+        return CGRect(x: xr.lowerBound, y: yr.lowerBound, width: xr.count, height: yr.count)
     }
 
     private func rawPixels(_ image: UIImage) -> (Int, Int, [UInt8])? {

@@ -29,7 +29,7 @@ targets:
         CODE_SIGN_ENTITLEMENTS: PikminPilot/PikminPilot.entitlements
         PRODUCT_BUNDLE_IDENTIFIER: com.woodypikmin.pikminpilot
         PRODUCT_NAME: PikminPilot
-        TARGETED_DEVICE_FAMILY: '1'
+        TARGETED_DEVICE_FAMILY: '1,2'
         SWIFT_OBJC_BRIDGING_HEADER: PikminPilot/PikminPilot-Bridging-Header.h
         HEADER_SEARCH_PATHS:
         - $(inherited)
@@ -40,8 +40,8 @@ targets:
         - -lc++
         - -lz
         CODE_SIGN_STYLE: Manual
-        CURRENT_PROJECT_VERSION: '1140'
-        MARKETING_VERSION: '11.4'
+        CURRENT_PROJECT_VERSION: '1150'
+        MARKETING_VERSION: '11.5'
     scheme:
       testTargets:
       - PikminPilotRunnerUITests
@@ -60,12 +60,12 @@ targets:
         INFOPLIST_FILE: PikminPilotTunnel/Info.plist
         CODE_SIGN_ENTITLEMENTS: PikminPilotTunnel/PikminPilotTunnel.entitlements
         PRODUCT_NAME: PikminPilotTunnel
-        TARGETED_DEVICE_FAMILY: '1'
+        TARGETED_DEVICE_FAMILY: '1,2'
         SKIP_INSTALL: YES
         APPLICATION_EXTENSION_API_ONLY: YES
         CODE_SIGN_STYLE: Manual
-        CURRENT_PROJECT_VERSION: '1140'
-        MARKETING_VERSION: '11.4'
+        CURRENT_PROJECT_VERSION: '1150'
+        MARKETING_VERSION: '11.5'
   PikminPilotRunnerUITests:
     type: bundle.ui-testing
     platform: iOS
@@ -77,9 +77,9 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.woodypikmin.pikminpilot.runner
         PRODUCT_NAME: PikminPilotRunnerUITests
-        TARGETED_DEVICE_FAMILY: '1'
+        TARGETED_DEVICE_FAMILY: '1,2'
         TEST_TARGET_NAME: PikminPilot
         GENERATE_INFOPLIST_FILE: true
         CODE_SIGN_STYLE: Automatic
-        CURRENT_PROJECT_VERSION: '1140'
-        MARKETING_VERSION: '11.4'
+        CURRENT_PROJECT_VERSION: '1150'
+        MARKETING_VERSION: '11.5'
