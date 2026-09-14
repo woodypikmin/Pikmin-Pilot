@@ -1,4 +1,4 @@
-name: Build Pikmin Pilot Full Windows Setup v2.2
+name: Build Pikmin Pilot Full Windows Setup v2.3
 
 on:
   workflow_dispatch:
@@ -151,11 +151,41 @@ jobs:
           Push-Location pilot
           gh run download $runId -D ..\ios-artifact
           Pop-Location
-          $ipa = Get-ChildItem ios-artifact -Recurse -File -Filter *.ipa | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-          if (-not $ipa) { throw "No IPA found in artifacts from build-ios.yml run $runId" }
+          # IMPORTANT: build-ios.yml uploads TWO IPAs: the real Pikmin Pilot host IPA
+          # and a Runner-only IPA. Never select an arbitrary *.ipa here.
+          $candidates = @(Get-ChildItem ios-artifact -Recurse -File | Where-Object {
+            $_.Name -like 'PikminPilot-*-FULLY-SIGNED-DEVELOPMENT.ipa'
+          })
+          if ($candidates.Count -ne 1) {
+            Write-Host 'IPA candidates found:'
+            Get-ChildItem ios-artifact -Recurse -File -Filter *.ipa | Select-Object FullName, Length
+            throw "Expected exactly one PikminPilot-*-FULLY-SIGNED-DEVELOPMENT.ipa, found $($candidates.Count)"
+          }
+          $ipa = $candidates[0]
           if ($ipa.Length -lt 100KB) { throw "IPA is unexpectedly small: $($ipa.FullName)" }
           Copy-Item $ipa.FullName out\PikminPilot.ipa
-          Write-Host "Bundled IPA: $($ipa.FullName) ($([math]::Round($ipa.Length/1MB, 1)) MB)"
+          Write-Host "Bundled HOST IPA: $($ipa.FullName) ($([math]::Round($ipa.Length/1MB, 1)) MB)"
+
+          # Structural guard: the distributable IPA must contain PikminPilot.app at
+          # Payload root. A Runner-only IPA has PikminPilotRunnerUITests-Runner.app
+          # at Payload root and must NEVER be handed to Windows Setup.
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [IO.Compression.ZipFile]::OpenRead((Resolve-Path 'out\PikminPilot.ipa'))
+          try {
+            $names = @($zip.Entries | ForEach-Object { $_.FullName })
+            if (-not ($names | Where-Object { $_ -eq 'Payload/PikminPilot.app/Info.plist' })) {
+              throw 'Bundled IPA is not the Pikmin Pilot host app: Payload/PikminPilot.app/Info.plist missing'
+            }
+            if ($names | Where-Object { $_ -like 'Payload/PikminPilotRunnerUITests-Runner.app/*' }) {
+              throw 'Runner-only IPA detected at Payload root; refusing to package it as PikminPilot.ipa'
+            }
+            if (-not ($names | Where-Object { $_ -like 'Payload/PikminPilot.app/*PikminPilotEmbeddedRunner.ipa' })) {
+              throw 'Host IPA is missing embedded Runner resource'
+            }
+          } finally {
+            $zip.Dispose()
+          }
+          Write-Host 'Host IPA structure verified: Payload/PikminPilot.app + embedded Runner.'
 
       - name: Bootstrap artifact self-check
         shell: pwsh
@@ -175,9 +205,9 @@ jobs:
           }
           Get-ChildItem out -Recurse | Select-Object FullName, Length
 
-      - name: Upload full Windows Setup v2.2
+      - name: Upload full Windows Setup v2.3
         uses: actions/upload-artifact@v4
         with:
-          name: PikminPilot-Full-Windows-Setup-v2.2
+          name: PikminPilot-Full-Windows-Setup-v2.3
           path: out/
           if-no-files-found: error
