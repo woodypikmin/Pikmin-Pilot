@@ -1,0 +1,54 @@
+name: Build Pikmin Pilot Pairing Helper for Windows
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-windows-helper:
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout Pikmin Pilot repo
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Download idevice_pair v1.1.0
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Invoke-WebRequest `
+            -Uri 'https://github.com/jkcoxson/idevice_pair/archive/refs/tags/v1.1.0.zip' `
+            -OutFile 'idevice_pair-v1.1.0.zip'
+          Expand-Archive -Path 'idevice_pair-v1.1.0.zip' -DestinationPath '.' -Force
+          if (-not (Test-Path 'idevice_pair-1.1.0\src\main.rs')) {
+            throw 'idevice_pair source not found after extraction'
+          }
+
+      - name: Patch Pikmin Pilot destination
+        shell: pwsh
+        run: |
+          python WindowsPairingSetup/patch_idevice_pair.py idevice_pair-1.1.0/src/main.rs
+          Select-String -Path idevice_pair-1.1.0/src/main.rs -Pattern 'Pikmin Pilot' | Out-Host
+
+      - name: Build release EXE
+        shell: pwsh
+        working-directory: idevice_pair-1.1.0
+        run: cargo build --release --locked
+
+      - name: Package helper
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          Copy-Item 'idevice_pair-1.1.0\target\release\idevice_pair.exe' 'out\PikminPilotPairingSetup.exe'
+          Copy-Item 'WindowsPairingSetup\USER_README.txt' 'out\README.txt'
+          Copy-Item 'WindowsPairingSetup\THIRD_PARTY_NOTICE.txt' 'out\THIRD_PARTY_NOTICE.txt'
+
+      - name: Upload Windows pairing helper
+        uses: actions/upload-artifact@v4
+        with:
+          name: PikminPilot-Pairing-Setup-Windows
+          path: out/
+          if-no-files-found: error
