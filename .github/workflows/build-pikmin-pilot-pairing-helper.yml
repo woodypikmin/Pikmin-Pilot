@@ -8,6 +8,7 @@ jobs:
     runs-on: windows-latest
     permissions:
       contents: read
+
     steps:
       - name: Checkout Pikmin Pilot repo
         uses: actions/checkout@v4
@@ -27,21 +28,62 @@ jobs:
             throw 'idevice_pair v1.1.0 known_apps.rs not found after extraction'
           }
 
-      - name: Patch Pikmin Pilot Remote Pairing destination
+      - name: Add Pikmin Pilot Remote Pairing destination
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          Write-Host '--- upstream v1.1.0 known_apps.rs ---'
-          Get-Content idevice_pair-1.1.0/src/known_apps.rs
+          $path = 'idevice_pair-1.1.0\src\known_apps.rs'
+          $text = [System.IO.File]::ReadAllText($path)
 
-          python WindowsPairingSetup/patch_idevice_pair.py idevice_pair-1.1.0/src
+          $needle = 'const REMOTE: &[KnownApp] = &['
+          $entry = '    ("Pikmin Pilot", "rp_pairing_file.plist"),'
 
-          Write-Host '--- patched REMOTE table ---'
-          $content = Get-Content idevice_pair-1.1.0/src/known_apps.rs -Raw
-          if ($content -notmatch '\("Pikmin Pilot",\s*"rp_pairing_file\.plist"\)') {
+          $remoteStart = $text.IndexOf($needle, [System.StringComparison]::Ordinal)
+          if ($remoteStart -lt 0) {
+            Write-Host '--- known_apps.rs ---'
+            Write-Host $text
+            throw 'Could not locate exact idevice_pair v1.1.0 REMOTE table opening'
+          }
+
+          $remoteEnd = $text.IndexOf('];', $remoteStart, [System.StringComparison]::Ordinal)
+          if ($remoteEnd -lt 0) {
+            throw 'Could not locate end of REMOTE table'
+          }
+
+          $remoteBlock = $text.Substring($remoteStart, $remoteEnd - $remoteStart)
+          if ($remoteBlock.Contains('("Pikmin Pilot", "rp_pairing_file.plist")')) {
+            Write-Host 'Pikmin Pilot REMOTE entry already present'
+          } else {
+            $lineEnd = $text.IndexOf("`n", $remoteStart)
+            if ($lineEnd -lt 0 -or $lineEnd -gt $remoteEnd) {
+              throw 'Could not locate first line ending after REMOTE table opening'
+            }
+
+            $insertPos = $lineEnd + 1
+            $text = $text.Insert($insertPos, $entry + "`n")
+            [System.IO.File]::WriteAllText(
+              $path,
+              $text,
+              [System.Text.UTF8Encoding]::new($false)
+            )
+            Write-Host 'Inserted Pikmin Pilot directly into REMOTE table'
+          }
+
+          # Re-read from disk and verify that the tuple is physically inside REMOTE.
+          $verify = [System.IO.File]::ReadAllText($path)
+          $verifyStart = $verify.IndexOf($needle, [System.StringComparison]::Ordinal)
+          $verifyEnd = $verify.IndexOf('];', $verifyStart, [System.StringComparison]::Ordinal)
+          if ($verifyStart -lt 0 -or $verifyEnd -lt 0) {
+            throw 'Verification could not locate REMOTE table'
+          }
+          $verifyBlock = $verify.Substring($verifyStart, $verifyEnd - $verifyStart)
+          if (-not $verifyBlock.Contains('("Pikmin Pilot", "rp_pairing_file.plist")')) {
             throw 'Pikmin Pilot REMOTE tuple was not inserted'
           }
-          Get-Content idevice_pair-1.1.0/src/known_apps.rs | Select-String -Pattern 'REMOTE|Pikmin Pilot|Auto Capture|StikDebug' -Context 1,2 | ForEach-Object { Write-Host $_.ToString() }
+
+          Write-Host '--- verified REMOTE table ---'
+          Write-Host $verifyBlock
+          Write-Host 'Pikmin Pilot Remote Pairing destination verified.'
 
       - name: Build release EXE
         shell: pwsh
@@ -57,12 +99,16 @@ jobs:
             throw 'idevice_pair.exe was not produced'
           }
           Copy-Item 'idevice_pair-1.1.0\target\release\idevice_pair.exe' 'out\PikminPilotPairingSetup.exe'
-          Copy-Item 'WindowsPairingSetup\USER_README.txt' 'out\README.txt'
-          Copy-Item 'WindowsPairingSetup\THIRD_PARTY_NOTICE.txt' 'out\THIRD_PARTY_NOTICE.txt'
+          if (Test-Path 'WindowsPairingSetup\USER_README.txt') {
+            Copy-Item 'WindowsPairingSetup\USER_README.txt' 'out\README.txt'
+          }
+          if (Test-Path 'WindowsPairingSetup\THIRD_PARTY_NOTICE.txt') {
+            Copy-Item 'WindowsPairingSetup\THIRD_PARTY_NOTICE.txt' 'out\THIRD_PARTY_NOTICE.txt'
+          }
 
       - name: Upload Windows pairing helper
         uses: actions/upload-artifact@v4
         with:
-          name: PikminPilot-Pairing-Setup-Windows-v1.3
+          name: PikminPilot-Pairing-Setup-Windows-v1.4
           path: out/
           if-no-files-found: error
