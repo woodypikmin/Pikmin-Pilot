@@ -3,6 +3,7 @@ using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using System.Windows.Forms;
 
 internal sealed class SetupConfig
 {
@@ -18,63 +19,196 @@ internal sealed record BootstrapReply(string? status, string? requestId, string?
 
 internal static class Program
 {
+    [STAThread]
+    private static void Main()
+    {
+        Application.EnableVisualStyles();
+        Application.SetCompatibleTextRenderingDefault(false);
+        Application.ThreadException += (_, e) => Fatal(e.Exception);
+        AppDomain.CurrentDomain.UnhandledException += (_, e) => Fatal(e.ExceptionObject as Exception ?? new Exception("Unknown fatal error"));
+        Application.Run(new MainForm());
+    }
+
+    private static void Fatal(Exception ex)
+    {
+        try { File.AppendAllText(Path.Combine(AppContext.BaseDirectory, "PikminPilotSetup.log"), $"{DateTime.Now:O} FATAL {ex}\r\n"); } catch { }
+        try { MessageBox.Show(ex.ToString(), "Pikmin Pilot Setup — Fatal Error", MessageBoxButtons.OK, MessageBoxIcon.Error); } catch { }
+    }
+}
+
+internal sealed class MainForm : Form
+{
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromMinutes(10) };
     private static string BaseDir => AppContext.BaseDirectory;
     private static string ToolsDir => Path.Combine(BaseDir, "tools");
+    private static string LogPath => Path.Combine(BaseDir, "PikminPilotSetup.log");
 
-    public static async Task<int> Main()
+    private readonly Label _title = new();
+    private readonly Label _status = new();
+    private readonly TextBox _udid = new();
+    private readonly Button _setup = new();
+    private readonly Button _refresh = new();
+    private readonly Button _pairing = new();
+    private readonly Button _openLog = new();
+    private readonly TextBox _log = new();
+    private string? _currentUdid;
+
+    public MainForm()
     {
-        Console.OutputEncoding = Encoding.UTF8;
-        Console.Title = "Pikmin Pilot Setup";
-        Banner();
+        Text = "Pikmin Pilot Setup v2.1";
+        Width = 820;
+        Height = 650;
+        StartPosition = FormStartPosition.CenterScreen;
+        MinimumSize = new System.Drawing.Size(720, 540);
 
+        _title.Text = "Pikmin Pilot — Windows One-Time Setup";
+        _title.Font = new System.Drawing.Font(System.Drawing.SystemFonts.DefaultFont.FontFamily, 16, System.Drawing.FontStyle.Bold);
+        _title.AutoSize = true;
+        _title.Left = 20;
+        _title.Top = 18;
+
+        _status.Text = "正在檢查 iPhone / iPad…";
+        _status.AutoSize = true;
+        _status.Left = 22;
+        _status.Top = 58;
+
+        var udidLabel = new Label { Text = "Detected UDID", AutoSize = true, Left = 22, Top = 93 };
+        _udid.Left = 22;
+        _udid.Top = 114;
+        _udid.Width = 610;
+        _udid.ReadOnly = true;
+
+        _refresh.Text = "重新偵測";
+        _refresh.Left = 646;
+        _refresh.Top = 112;
+        _refresh.Width = 125;
+        _refresh.Click += async (_, _) => await RefreshDeviceAsync();
+
+        _setup.Text = "SET UP THIS IPHONE / IPAD";
+        _setup.Left = 22;
+        _setup.Top = 158;
+        _setup.Width = 310;
+        _setup.Height = 48;
+        _setup.Enabled = false;
+        _setup.Click += async (_, _) => await SetupAsync();
+
+        _pairing.Text = "開啟 Pairing 視窗";
+        _pairing.Left = 344;
+        _pairing.Top = 158;
+        _pairing.Width = 180;
+        _pairing.Height = 48;
+        _pairing.Click += async (_, _) => await LaunchPairingHelperAsync(waitForExit: false);
+
+        _openLog.Text = "開啟 Log";
+        _openLog.Left = 536;
+        _openLog.Top = 158;
+        _openLog.Width = 120;
+        _openLog.Height = 48;
+        _openLog.Click += (_, _) => OpenLog();
+
+        _log.Left = 22;
+        _log.Top = 224;
+        _log.Width = 750;
+        _log.Height = 365;
+        _log.Multiline = true;
+        _log.ReadOnly = true;
+        _log.ScrollBars = ScrollBars.Vertical;
+        _log.Font = new System.Drawing.Font("Consolas", 9);
+        _log.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
+
+        Controls.AddRange(new Control[] { _title, _status, udidLabel, _udid, _refresh, _setup, _pairing, _openLog, _log });
+        Shown += async (_, _) => await RefreshDeviceAsync();
+    }
+
+    private async Task RefreshDeviceAsync()
+    {
+        SetBusy(true, "正在偵測 USB 裝置…");
         try
         {
-            var config = LoadConfig();
             var udids = await DetectDevices();
             if (udids.Count == 0)
             {
-                Fail("找不到 iPhone / iPad。請安裝 Apple iTunes / Apple Mobile Device USB driver，解鎖裝置、USB 連線並按『信任』後再試一次。");
-                return 2;
+                _currentUdid = null;
+                _udid.Text = "";
+                _status.Text = "找不到裝置 — 請 USB 連線、解鎖並按『信任』";
+                Log("找不到 iPhone / iPad。確認 Apple Mobile Device / iTunes 驅動已安裝。", error: true);
+                return;
             }
-
-            string udid = ChooseDevice(udids);
-            string deviceName = $"Pikmin-{udid[^Math.Min(8, udid.Length)..]}";
-            Console.WriteLine($"\n✓ 已偵測裝置 UDID: {udid}");
-
-            string ipa = await ResolveIpa(config, udid, deviceName);
-            Console.WriteLine($"\n✓ IPA ready: {ipa}");
-
-            await InstallIpa(udid, ipa);
-            Console.WriteLine("\n✓ Pikmin Pilot 安裝完成");
-
-            await RunPairingHelper();
-
-            Console.ForegroundColor = ConsoleColor.Green;
-            Console.WriteLine("\n==============================================");
-            Console.WriteLine("SETUP COMPLETE");
-            Console.WriteLine("拔掉 USB，開 Pikmin Pilot → START PILOT。");
-            Console.WriteLine("==============================================");
-            Console.ResetColor();
-            Console.WriteLine("\n按 Enter 關閉。");
-            Console.ReadLine();
-            return 0;
+            if (udids.Count > 1)
+            {
+                _currentUdid = null;
+                _udid.Text = string.Join(", ", udids);
+                _status.Text = "偵測到多台裝置；請只留下要設定的那一台 USB 裝置";
+                Log("偵測到多台裝置，為避免把 IPA / pairing 寫到錯的裝置，本版要求一次只接一台。", error: true);
+                return;
+            }
+            _currentUdid = udids[0];
+            _udid.Text = _currentUdid;
+            _status.Text = "裝置已就緒。按下 SET UP THIS IPHONE / IPAD。";
+            Log($"Detected device: {_currentUdid}");
         }
         catch (Exception ex)
         {
-            Fail(ex.Message);
-            Console.WriteLine("\n按 Enter 關閉。");
-            Console.ReadLine();
-            return 1;
+            _currentUdid = null;
+            _status.Text = "裝置偵測失敗";
+            Log(ex.Message, error: true);
+            MessageBox.Show(ex.Message, "Device detection failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        finally
+        {
+            SetBusy(false);
         }
     }
 
-    private static void Banner()
+    private async Task SetupAsync()
     {
-        Console.ForegroundColor = ConsoleColor.Cyan;
-        Console.WriteLine("Pikmin Pilot Setup — Windows Bootstrap v2.0");
-        Console.ResetColor();
-        Console.WriteLine("USB → UDID → IPA → Install → RPPairing\n");
+        if (string.IsNullOrWhiteSpace(_currentUdid))
+        {
+            await RefreshDeviceAsync();
+            if (string.IsNullOrWhiteSpace(_currentUdid)) return;
+        }
+
+        SetBusy(true, "設定中…請保持 iPhone / iPad 解鎖並連著 USB");
+        try
+        {
+            string udid = _currentUdid!;
+            var config = LoadConfig();
+            string deviceName = $"Pikmin-{udid[^Math.Min(8, udid.Length)..]}";
+
+            Log("STEP 1/3 — resolving signed Pikmin Pilot IPA");
+            string ipa = await ResolveIpa(config, udid, deviceName);
+            Log($"IPA ready: {ipa}");
+
+            Log("STEP 2/3 — installing Pikmin Pilot");
+            await InstallIpa(udid, ipa);
+            Log("Pikmin Pilot install/upgrade completed.");
+
+            Log("STEP 3/3 — opening Remote Pairing GUI");
+            MessageBox.Show(
+                "Pikmin Pilot 已安裝。接下來會開啟 Pairing 視窗。\n\n請選：\n1. 你的 iPhone / iPad\n2. Remote pairing\n3. Create\n4. Pikmin Pilot\n\n完成後關閉 Pairing 視窗。",
+                "Remote Pairing",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+
+            await LaunchPairingHelperAsync(waitForExit: true);
+            _status.Text = "Setup 完成 — 拔掉 USB，開 Pikmin Pilot → START PILOT";
+            Log("SETUP COMPLETE");
+            MessageBox.Show(
+                "Setup 完成。\n\n拔掉 USB，打開 Pikmin Pilot，按 START PILOT。",
+                "Pikmin Pilot Setup",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+        }
+        catch (Exception ex)
+        {
+            _status.Text = "Setup 失敗 — 詳細原因已寫入 Log";
+            Log(ex.ToString(), error: true);
+            MessageBox.Show(ex.Message + "\n\n詳細資料：PikminPilotSetup.log", "Setup failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        finally
+        {
+            SetBusy(false);
+        }
     }
 
     private static SetupConfig LoadConfig()
@@ -90,7 +224,13 @@ internal static class Program
     private static async Task<List<string>> DetectDevices()
     {
         string exe = Tool("idevice_id.exe");
-        foreach (var args in new[] { Array.Empty<string>(), new[] { "-l" } })
+        var attempts = new[]
+        {
+            Array.Empty<string>(),
+            new[] { "-l" },
+            new[] { "list" }
+        };
+        foreach (var args in attempts)
         {
             var result = await RunCapture(exe, args, allowFailure: true);
             var ids = result.Output
@@ -104,53 +244,30 @@ internal static class Program
         return new List<string>();
     }
 
-    private static string ChooseDevice(List<string> udids)
-    {
-        if (udids.Count == 1) return udids[0];
-        Console.WriteLine("偵測到多台裝置：");
-        for (int i = 0; i < udids.Count; i++) Console.WriteLine($"  {i + 1}. {udids[i]}");
-        while (true)
-        {
-            Console.Write("選擇裝置編號: ");
-            if (int.TryParse(Console.ReadLine(), out int index) && index >= 1 && index <= udids.Count)
-                return udids[index - 1];
-        }
-    }
-
     private static async Task<string> ResolveIpa(SetupConfig cfg, string udid, string deviceName)
     {
-        string local = Path.Combine(BaseDir, cfg.LocalIpaFile ?? "PikminPilot.ipa");
-        if (File.Exists(local) && new FileInfo(local).Length > 1024 * 100)
-        {
-            Console.WriteLine("✓ 使用 Setup 資料夾內現有 PikminPilot.ipa（local mode）");
+        string local = Path.Combine(BaseDir, string.IsNullOrWhiteSpace(cfg.LocalIpaFile) ? "PikminPilot.ipa" : cfg.LocalIpaFile);
+        if (File.Exists(local) && new FileInfo(local).Length > 100 * 1024)
             return local;
-        }
 
         if (!string.IsNullOrWhiteSpace(cfg.IpaUrl))
-        {
-            Console.WriteLine("下載設定中的 IPA…");
             return await DownloadIpa(cfg.IpaUrl!);
-        }
 
         if (!string.IsNullOrWhiteSpace(cfg.BootstrapApiBase))
-        {
             return await RequestRegisteredIpa(cfg, udid, deviceName);
-        }
 
         string requestPath = Path.Combine(BaseDir, "device-request.txt");
         File.WriteAllText(requestPath, $"UDID={udid}{Environment.NewLine}NAME={deviceName}{Environment.NewLine}");
         throw new InvalidOperationException(
-            "這台裝置目前沒有可安裝的 IPA，而且 setup-config.json 尚未設定 bootstrapApiBase。\n" +
-            $"UDID 已寫入：{requestPath}\n" +
-            "你可以先到 GitHub Actions 執行 Register Device + Build Pilot，或部署 Toolkit 內的 BootstrapBackend 後再重跑 Setup。"
+            "Setup 包裡沒有 PikminPilot.ipa，而且尚未設定 registration backend。\n\n" +
+            $"此裝置 UDID 已寫入：{requestPath}\n\n" +
+            "如果這是你自己測試，請先讓 GitHub build-ios.yml 成功一次，再重新 build Full Windows Setup v2.1。"
         );
     }
 
     private static async Task<string> RequestRegisteredIpa(SetupConfig cfg, string udid, string deviceName)
     {
         string api = cfg.BootstrapApiBase!.TrimEnd('/');
-        Console.WriteLine("這台裝置需要註冊 / 重新簽名，正在送出 UDID…");
-
         using var req = new HttpRequestMessage(HttpMethod.Post, api + "/register");
         if (!string.IsNullOrWhiteSpace(cfg.RegistrationToken))
             req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", cfg.RegistrationToken);
@@ -163,12 +280,9 @@ internal static class Program
 
         if (string.Equals(reply.status, "ready", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(reply.ipaUrl))
             return await DownloadIpa(reply.ipaUrl!);
-
         if (string.IsNullOrWhiteSpace(reply.requestId))
             throw new InvalidOperationException(reply.message ?? "Registration backend did not return requestId");
 
-        Console.WriteLine($"✓ 註冊工作已送出 request={reply.requestId}");
-        Console.WriteLine("等待 Apple device registration → profiles → GitHub build → release…");
         DateTime deadline = DateTime.UtcNow.AddMinutes(Math.Max(5, cfg.MaxWaitMinutes));
         while (DateTime.UtcNow < deadline)
         {
@@ -179,22 +293,14 @@ internal static class Program
                 statusReq.Headers.Authorization = new AuthenticationHeaderValue("Bearer", cfg.RegistrationToken);
             using var statusResp = await Http.SendAsync(statusReq);
             string statusBody = await statusResp.Content.ReadAsStringAsync();
-            if (!statusResp.IsSuccessStatusCode)
-            {
-                Console.Write(".");
-                continue;
-            }
+            if (!statusResp.IsSuccessStatusCode) continue;
             var status = JsonSerializer.Deserialize<BootstrapReply>(statusBody, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
             if (status is not null && string.Equals(status.status, "ready", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(status.ipaUrl))
-            {
-                Console.WriteLine("\n✓ 專屬 provisioning build ready");
                 return await DownloadIpa(status.ipaUrl!);
-            }
             if (status is not null && string.Equals(status.status, "failed", StringComparison.OrdinalIgnoreCase))
                 throw new InvalidOperationException(status.message ?? "Registration/build failed");
-            Console.Write(".");
         }
-        throw new TimeoutException("等待註冊 / GitHub build 超時。請檢查 Register Device + Build Pilot workflow。 ");
+        throw new TimeoutException("等待註冊 / GitHub build 超時。請檢查 Register Device + Build Pilot workflow。");
     }
 
     private static async Task<string> DownloadIpa(string url)
@@ -205,90 +311,118 @@ internal static class Program
         await using var input = await resp.Content.ReadAsStreamAsync();
         await using var output = File.Create(path);
         await input.CopyToAsync(output);
-        if (new FileInfo(path).Length < 1024 * 100) throw new InvalidOperationException("Downloaded IPA is unexpectedly small");
+        if (new FileInfo(path).Length < 100 * 1024) throw new InvalidOperationException("Downloaded IPA is unexpectedly small");
         return path;
     }
 
     private static async Task InstallIpa(string udid, string ipa)
     {
         string tools = Tool("idevice-tools.exe");
-        Console.WriteLine("\n安裝 Pikmin Pilot…");
-        string[] installArgs = { "--udid", udid, "ideviceinstaller", "install", ipa };
-        var install = await RunStreaming(tools, installArgs, allowFailure: true);
-        if (install.ExitCode == 0) return;
+        var install = await RunCapture(tools, new[] { "--udid", udid, "ideviceinstaller", "install", ipa }, allowFailure: true, timeoutMinutes: 15);
+        if (install.ExitCode == 0 && install.Output.Contains("install success", StringComparison.OrdinalIgnoreCase)) return;
 
-        Console.WriteLine("Install 未成功，嘗試 upgrade…");
-        string[] upgradeArgs = { "--udid", udid, "ideviceinstaller", "upgrade", ipa };
-        var upgrade = await RunStreaming(tools, upgradeArgs, allowFailure: true);
-        if (upgrade.ExitCode != 0)
-            throw new InvalidOperationException("IPA 安裝失敗。最常見原因是：這台 UDID 尚未包含在 provisioning profile、尚未 Trust、或 Apple Mobile Device service 不可用。\n" + upgrade.Output);
+        var upgrade = await RunCapture(tools, new[] { "--udid", udid, "ideviceinstaller", "upgrade", ipa }, allowFailure: true, timeoutMinutes: 15);
+        if (upgrade.ExitCode == 0 && upgrade.Output.Contains("upgrade success", StringComparison.OrdinalIgnoreCase)) return;
+
+        string combined = install.Output + Environment.NewLine + upgrade.Output;
+        if (combined.Contains("provision", StringComparison.OrdinalIgnoreCase) || combined.Contains("verification", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("IPA 被 iOS 拒絕。這台 UDID 很可能還沒包含在 App / Tunnel / XCTRunner provisioning profiles。\n\n" + combined);
+        throw new InvalidOperationException("Pikmin Pilot IPA 安裝失敗。確認手機已解鎖、已 Trust、Apple Mobile Device 驅動可用。\n\n" + combined);
     }
 
-    private static async Task RunPairingHelper()
+    private async Task LaunchPairingHelperAsync(bool waitForExit)
     {
-        string helper = Tool("PikminPilotPairingSetup.exe");
-        Console.ForegroundColor = ConsoleColor.Yellow;
-        Console.WriteLine("\n下一步：建立 Remote Pairing");
-        Console.WriteLine("Pairing Setup 會自動開啟。請：Remote pairing → Create → Pikmin Pilot。");
-        Console.WriteLine("完成後關閉 Pairing Setup，本程式會繼續。");
-        Console.ResetColor();
-        var p = Process.Start(new ProcessStartInfo(helper) { UseShellExecute = true })
-                ?? throw new InvalidOperationException("Unable to launch pairing helper");
-        await p.WaitForExitAsync();
+        try
+        {
+            string helper = Tool("PikminPilotPairingSetup.exe");
+            var sw = Stopwatch.StartNew();
+            var psi = new ProcessStartInfo(helper)
+            {
+                WorkingDirectory = ToolsDir,
+                UseShellExecute = true
+            };
+            var p = Process.Start(psi) ?? throw new InvalidOperationException("Windows 無法啟動 Pairing helper");
+            Log($"Pairing helper started, PID={p.Id}");
+            if (!waitForExit) return;
+            await p.WaitForExitAsync();
+            sw.Stop();
+            Log($"Pairing helper exited code={p.ExitCode}, runtime={sw.Elapsed.TotalSeconds:F1}s");
+            if (sw.Elapsed < TimeSpan.FromSeconds(2))
+                throw new InvalidOperationException(
+                    "Pairing 視窗幾乎立刻關閉。這通常表示 Windows 執行環境 / Apple Mobile Device 支援有問題。\n\n" +
+                    "v2.1 已把 Rust CRT 靜態連結；如果仍發生，請把 PikminPilotSetup.log 給我。"
+                );
+        }
+        catch (Exception ex)
+        {
+            Log(ex.ToString(), error: true);
+            if (!waitForExit)
+                MessageBox.Show(ex.Message, "Pairing helper failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            else
+                throw;
+        }
     }
 
     private static string Tool(string name)
     {
         string path = Path.Combine(ToolsDir, name);
-        if (!File.Exists(path)) throw new FileNotFoundException($"Missing bundled tool: {path}");
+        if (!File.Exists(path)) throw new FileNotFoundException($"Setup package is incomplete. Missing bundled tool: {path}");
         return path;
     }
 
-    private static async Task<(int ExitCode, string Output)> RunCapture(string exe, IEnumerable<string> args, bool allowFailure)
+    private static async Task<(int ExitCode, string Output)> RunCapture(string exe, IEnumerable<string> args, bool allowFailure, int timeoutMinutes = 2)
     {
         var psi = new ProcessStartInfo(exe)
         {
             UseShellExecute = false,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
-            CreateNoWindow = true
+            CreateNoWindow = true,
+            WorkingDirectory = Path.GetDirectoryName(exe) ?? BaseDir
         };
         foreach (string arg in args) psi.ArgumentList.Add(arg);
         using var p = Process.Start(psi) ?? throw new InvalidOperationException($"Unable to launch {exe}");
-        string stdout = await p.StandardOutput.ReadToEndAsync();
-        string stderr = await p.StandardError.ReadToEndAsync();
-        await p.WaitForExitAsync();
-        string output = stdout + Environment.NewLine + stderr;
+        Task<string> stdoutTask = p.StandardOutput.ReadToEndAsync();
+        Task<string> stderrTask = p.StandardError.ReadToEndAsync();
+        using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(timeoutMinutes));
+        try { await p.WaitForExitAsync(cts.Token); }
+        catch (OperationCanceledException)
+        {
+            try { p.Kill(entireProcessTree: true); } catch { }
+            throw new TimeoutException($"Tool timed out after {timeoutMinutes} minutes: {Path.GetFileName(exe)}");
+        }
+        string output = (await stdoutTask) + Environment.NewLine + (await stderrTask);
         if (!allowFailure && p.ExitCode != 0) throw new InvalidOperationException(output);
         return (p.ExitCode, output);
     }
 
-    private static async Task<(int ExitCode, string Output)> RunStreaming(string exe, IEnumerable<string> args, bool allowFailure)
+    private void SetBusy(bool busy, string? status = null)
     {
-        var psi = new ProcessStartInfo(exe)
-        {
-            UseShellExecute = false,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            CreateNoWindow = true
-        };
-        foreach (string arg in args) psi.ArgumentList.Add(arg);
-        using var p = Process.Start(psi) ?? throw new InvalidOperationException($"Unable to launch {exe}");
-        var sb = new StringBuilder();
-        p.OutputDataReceived += (_, e) => { if (e.Data is not null) { Console.WriteLine(e.Data); sb.AppendLine(e.Data); } };
-        p.ErrorDataReceived += (_, e) => { if (e.Data is not null) { Console.WriteLine(e.Data); sb.AppendLine(e.Data); } };
-        p.BeginOutputReadLine();
-        p.BeginErrorReadLine();
-        await p.WaitForExitAsync();
-        if (!allowFailure && p.ExitCode != 0) throw new InvalidOperationException(sb.ToString());
-        return (p.ExitCode, sb.ToString());
+        _setup.Enabled = !busy && !string.IsNullOrWhiteSpace(_currentUdid);
+        _refresh.Enabled = !busy;
+        _pairing.Enabled = !busy;
+        if (!string.IsNullOrWhiteSpace(status)) _status.Text = status;
+        Cursor = busy ? Cursors.WaitCursor : Cursors.Default;
     }
 
-    private static void Fail(string message)
+    private void Log(string text, bool error = false)
     {
-        Console.ForegroundColor = ConsoleColor.Red;
-        Console.WriteLine("\nSETUP FAILED");
-        Console.ResetColor();
-        Console.WriteLine(message);
+        string line = $"[{DateTime.Now:HH:mm:ss}] {(error ? "ERROR " : "")}{text}";
+        if (InvokeRequired) { BeginInvoke((MethodInvoker)(() => Log(text, error))); return; }
+        _log.AppendText(line + Environment.NewLine);
+        try { File.AppendAllText(LogPath, $"{DateTime.Now:O} {(error ? "ERROR " : "")}{text}{Environment.NewLine}"); } catch { }
+    }
+
+    private void OpenLog()
+    {
+        try
+        {
+            if (!File.Exists(LogPath)) File.WriteAllText(LogPath, "Pikmin Pilot Setup log\r\n");
+            Process.Start(new ProcessStartInfo("notepad.exe", $"\"{LogPath}\"") { UseShellExecute = true });
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(ex.Message, "Unable to open log", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
     }
 }

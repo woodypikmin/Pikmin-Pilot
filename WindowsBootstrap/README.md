@@ -1,23 +1,26 @@
-# PikminPilotSetup.exe
+# Pikmin Pilot Full Windows Bootstrap v2.1
 
-Goal: a Windows user should not need to understand IPA, UDID, provisioning, or RPPairing.
+This is the Windows fallback for iOS/iPadOS versions that cannot bootstrap RPPairing entirely on-device.
 
-## Local test mode (recommended first)
+## User flow
 
-Put a Pikmin Pilot IPA that is already provisioned for the connected device next to `PikminPilotSetup.exe` and name it `PikminPilot.ipa`.
+1. Install Apple iTunes / Apple Mobile Device support on Windows.
+2. Connect exactly one iPhone/iPad by USB.
+3. Unlock it and tap **Trust** if asked.
+4. Double-click `PikminPilotSetup.exe` (or `START_HERE.cmd`).
+5. The visible setup window detects the UDID and installs the bundled `PikminPilot.ipa`.
+6. Setup opens the Remote Pairing GUI. Choose **Remote pairing → Create → Pikmin Pilot**.
+7. Close the pairing window when complete.
+8. Unplug USB, open Pikmin Pilot, press **START PILOT**.
 
-Then:
+## Important v2.1 changes
 
-1. Install iTunes / Apple Mobile Device USB drivers.
-2. Connect unlocked iPhone/iPad by USB and tap Trust.
-3. Double-click `PikminPilotSetup.exe`.
-4. Setup detects UDID and installs the IPA automatically.
-5. It launches the bundled pairing helper. Choose **Remote pairing → Create → Pikmin Pilot**.
-6. Close the pairing helper. Disconnect USB and start Pikmin Pilot.
+- The Setup app is a real WinForms `WinExe`; it no longer relies on a console window that can flash and disappear.
+- Every run writes `PikminPilotSetup.log` next to the EXE.
+- The Rust helper binaries are built with static CRT linking to reduce missing-runtime launch failures.
+- The GitHub workflow checks out upstream repos with `actions/checkout`; it no longer downloads GitHub source ZIPs with `Invoke-WebRequest`.
+- By default the workflow downloads the latest successful `build-ios.yml` artifact and bundles its signed IPA as `PikminPilot.ipa`.
 
-## Backend mode
+## New / unregistered devices
 
-Copy `setup-config.example.json` to `setup-config.json` and configure the Cloudflare Worker supplied under `BootstrapBackend/`.
-If no local IPA exists, Setup submits the UDID and waits until the registration workflow publishes a freshly provisioned IPA.
-
-The Apple API key is NEVER stored in this Windows package.
+If the bundled IPA does not include the connected UDID in its provisioning profiles, iOS will reject installation. `PikminPilotSetup.exe` will show that error instead of silently exiting. The Toolkit still contains the registration/backend prototype for automating the Apple Developer device-registration/rebuild path; that server-side path remains a separate deployment step.
