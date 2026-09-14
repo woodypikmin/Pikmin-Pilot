@@ -23,15 +23,20 @@ jobs:
             -Uri 'https://github.com/jkcoxson/idevice_pair/archive/refs/tags/v1.1.0.zip' `
             -OutFile 'idevice_pair-v1.1.0.zip'
           Expand-Archive -Path 'idevice_pair-v1.1.0.zip' -DestinationPath '.' -Force
-          if (-not (Test-Path 'idevice_pair-1.1.0\src\main.rs')) {
-            throw 'idevice_pair source not found after extraction'
+          if (-not (Test-Path 'idevice_pair-1.1.0\src')) {
+            throw 'idevice_pair source directory not found after extraction'
           }
 
       - name: Patch Pikmin Pilot destination
         shell: pwsh
         run: |
-          python WindowsPairingSetup/patch_idevice_pair.py idevice_pair-1.1.0/src/main.rs
-          Select-String -Path idevice_pair-1.1.0/src/main.rs -Pattern 'Pikmin Pilot' | Out-Host
+          $ErrorActionPreference = 'Stop'
+          python WindowsPairingSetup/patch_idevice_pair.py idevice_pair-1.1.0/src
+          Write-Host '--- Pikmin Pilot patch verification ---'
+          Get-ChildItem idevice_pair-1.1.0/src -Recurse -Filter *.rs |
+            Select-String -Pattern 'Pikmin Pilot|RP_PAIRING_FILE_NAME' |
+            Select-Object -First 40 |
+            ForEach-Object { Write-Host $_.Line }
 
       - name: Build release EXE
         shell: pwsh
@@ -41,7 +46,11 @@ jobs:
       - name: Package helper
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force -Path out | Out-Null
+          if (-not (Test-Path 'idevice_pair-1.1.0\target\release\idevice_pair.exe')) {
+            throw 'idevice_pair.exe was not produced'
+          }
           Copy-Item 'idevice_pair-1.1.0\target\release\idevice_pair.exe' 'out\PikminPilotPairingSetup.exe'
           Copy-Item 'WindowsPairingSetup\USER_README.txt' 'out\README.txt'
           Copy-Item 'WindowsPairingSetup\THIRD_PARTY_NOTICE.txt' 'out\THIRD_PARTY_NOTICE.txt'
@@ -49,6 +58,6 @@ jobs:
       - name: Upload Windows pairing helper
         uses: actions/upload-artifact@v4
         with:
-          name: PikminPilot-Pairing-Setup-Windows
+          name: PikminPilot-Pairing-Setup-Windows-v1.1
           path: out/
           if-no-files-found: error
