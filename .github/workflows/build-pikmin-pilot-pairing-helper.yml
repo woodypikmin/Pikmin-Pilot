@@ -23,22 +23,25 @@ jobs:
             -Uri 'https://github.com/jkcoxson/idevice_pair/archive/refs/tags/v1.1.0.zip' `
             -OutFile 'idevice_pair-v1.1.0.zip'
           Expand-Archive -Path 'idevice_pair-v1.1.0.zip' -DestinationPath '.' -Force
-          if (-not (Test-Path 'idevice_pair-1.1.0\src')) {
-            throw 'idevice_pair source directory not found after extraction'
+          if (-not (Test-Path 'idevice_pair-1.1.0\src\known_apps.rs')) {
+            throw 'idevice_pair v1.1.0 known_apps.rs not found after extraction'
           }
 
-      - name: Patch Pikmin Pilot destination
+      - name: Patch Pikmin Pilot Remote Pairing destination
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          Write-Host '--- upstream known_apps.rs anchors before patch ---'
-          Get-Content idevice_pair-1.1.0/src/known_apps.rs | Select-String -Pattern 'Auto Capture|StikDebug|plist|bundle' -Context 3,6 | ForEach-Object { Write-Host $_.ToString() }
+          Write-Host '--- upstream v1.1.0 known_apps.rs ---'
+          Get-Content idevice_pair-1.1.0/src/known_apps.rs
+
           python WindowsPairingSetup/patch_idevice_pair.py idevice_pair-1.1.0/src
-          Write-Host '--- Pikmin Pilot patch verification ---'
-          Get-ChildItem idevice_pair-1.1.0/src -Recurse -Filter *.rs |
-            Select-String -Pattern 'Pikmin Pilot|RP_PAIRING_FILE_NAME' |
-            Select-Object -First 40 |
-            ForEach-Object { Write-Host $_.Line }
+
+          Write-Host '--- patched REMOTE table ---'
+          $content = Get-Content idevice_pair-1.1.0/src/known_apps.rs -Raw
+          if ($content -notmatch '\("Pikmin Pilot",\s*"rp_pairing_file\.plist"\)') {
+            throw 'Pikmin Pilot REMOTE tuple was not inserted'
+          }
+          Get-Content idevice_pair-1.1.0/src/known_apps.rs | Select-String -Pattern 'REMOTE|Pikmin Pilot|Auto Capture|StikDebug' -Context 1,2 | ForEach-Object { Write-Host $_.ToString() }
 
       - name: Build release EXE
         shell: pwsh
@@ -60,6 +63,6 @@ jobs:
       - name: Upload Windows pairing helper
         uses: actions/upload-artifact@v4
         with:
-          name: PikminPilot-Pairing-Setup-Windows-v1.2
+          name: PikminPilot-Pairing-Setup-Windows-v1.3
           path: out/
           if-no-files-found: error
