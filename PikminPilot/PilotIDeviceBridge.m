@@ -3,7 +3,6 @@
 #import "idevice.h"
 
 #import <Foundation/Foundation.h>
-#import <UserNotifications/UserNotifications.h>
 #import <arpa/inet.h>
 #import <netinet/in.h>
 #import <sys/socket.h>
@@ -119,124 +118,6 @@ extern int32_t pilot_xctest_service_probe(
 );
 
 
-// Stage 11.6.4 iOS 27+ device-initiated RPPairing responder. Bonjour is
-// intentionally published by Foundation below rather than raw multicast Rust mDNS.
-// The pilot_pairing_host_accept prototype and its C callback typedefs come from
-// generated idevice.h. Keep a single ABI declaration to prevent cbindgen/ObjC drift.
-
-
-static NSNetService *gPPPairingNetService = nil;
-static NSString *gPPPairingHostStatus = @"STAGE 11.6.4 PAIRING HOST • idle";
-
-static NSObject *PPPairingHostLock(void) {
-    static NSObject *lock = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        lock = [NSObject new];
-    });
-    return lock;
-}
-
-static void PPSetPairingHostStatus(NSString *text) {
-    @synchronized (PPPairingHostLock()) {
-        gPPPairingHostStatus = [text copy] ?: @"";
-    }
-}
-
-static NSString *PPGetPairingHostStatusText(void) {
-    @synchronized (PPPairingHostLock()) {
-        return [gPPPairingHostStatus copy] ?: @"";
-    }
-}
-
-static void PPStopPairingBonjour(void) {
-    void (^block)(void) = ^{
-        if (gPPPairingNetService != nil) {
-            [gPPPairingNetService stop];
-            gPPPairingNetService = nil;
-        }
-    };
-    if ([NSThread isMainThread]) {
-        block();
-    } else {
-        dispatch_sync(dispatch_get_main_queue(), block);
-    }
-}
-
-static void PPPairingHostReady(const char *serviceIdentifierCString, uint16_t port, const char *txtCString) {
-    NSString *serviceIdentifier = serviceIdentifierCString != NULL
-        ? [NSString stringWithUTF8String:serviceIdentifierCString]
-        : nil;
-    NSString *txtBlob = txtCString != NULL
-        ? [NSString stringWithUTF8String:txtCString]
-        : @"";
-    if (serviceIdentifier.length == 0) {
-        PPSetPairingHostStatus(@"STAGE 11.6.4 PAIRING HOST FAILED • invalid Bonjour service identifier");
-        return;
-    }
-
-    NSMutableDictionary<NSString *, NSData *> *txt = [NSMutableDictionary dictionary];
-    for (NSString *line in [txtBlob componentsSeparatedByString:@"\n"]) {
-        NSRange equals = [line rangeOfString:@"="];
-        if (equals.location == NSNotFound || equals.location == 0) {
-            continue;
-        }
-        NSString *key = [line substringToIndex:equals.location];
-        NSString *value = [line substringFromIndex:(equals.location + 1)];
-        NSData *data = [value dataUsingEncoding:NSUTF8StringEncoding];
-        if (key.length > 0 && data != nil) {
-            txt[key] = data;
-        }
-    }
-
-    void (^publishBlock)(void) = ^{
-        if (gPPPairingNetService != nil) {
-            [gPPPairingNetService stop];
-        }
-        gPPPairingNetService = [[NSNetService alloc]
-            initWithDomain:@"local."
-            type:@"_remotepairing-pairable-host._tcp."
-            name:serviceIdentifier
-            port:(NSInteger)port];
-        NSData *txtData = [NSNetService dataFromTXTRecordDictionary:txt];
-        if (txtData != nil) {
-            [gPPPairingNetService setTXTRecordData:txtData];
-        }
-        [gPPPairingNetService publish];
-    };
-    if ([NSThread isMainThread]) {
-        publishBlock();
-    } else {
-        dispatch_sync(dispatch_get_main_queue(), publishBlock);
-    }
-
-    PPSetPairingHostStatus([NSString stringWithFormat:
-        @"STAGE 11.6.4 PAIRING HOST READY ✅ • port=%u • open Settings → Privacy & Security → Developer Mode → Pair with Pikmin Pilot",
-        port]);
-}
-
-static void PPPairingHostPin(const char *pinCString) {
-    NSString *pin = pinCString != NULL ? [NSString stringWithUTF8String:pinCString] : @"";
-    NSString *displayPin = pin.length > 0 ? pin : @"------";
-    PPSetPairingHostStatus([NSString stringWithFormat:
-        @"STAGE 11.6.4 PAIRING PIN • %@ • enter this 6-digit code in the iOS pairing sheet",
-        displayPin]);
-
-    // Best-effort PIN delivery while Settings is foreground. Notification
-    // authorization is requested by Swift before the pairing host starts.
-    UNMutableNotificationContent *content = [UNMutableNotificationContent new];
-    content.title = @"Pikmin Pilot Pairing PIN";
-    content.body = [NSString stringWithFormat:@"%@ — enter this code in the iOS pairing sheet", displayPin];
-    content.sound = [UNNotificationSound defaultSound];
-    UNNotificationRequest *request = [UNNotificationRequest
-        requestWithIdentifier:@"PikminPilot.PairingPIN"
-        content:content
-        trigger:nil];
-    [[UNUserNotificationCenter currentNotificationCenter]
-        addNotificationRequest:request
-        withCompletionHandler:nil];
-}
-
 static void PPWriteMessage(char *message, size_t capacity, NSString *text) {
     if (message == NULL || capacity == 0) {
         return;
@@ -247,47 +128,6 @@ static void PPWriteMessage(char *message, size_t capacity, NSString *text) {
     message[capacity - 1] = '\0';
 }
 
-
-int32_t PPStartPhoneLocalPairingHost(
-    const char *outputPath,
-    uint64_t timeoutSeconds,
-    char *message,
-    size_t messageCapacity
-) {
-    if (outputPath == NULL) {
-        PPWriteMessage(message, messageCapacity, @"STAGE 11.6.4 PAIRING HOST FAILED • missing output path");
-        return -1;
-    }
-
-    PPStopPairingBonjour();
-    PPSetPairingHostStatus(@"STAGE 11.6.4 PAIRING HOST • starting TCP responder + Bonjour…");
-
-    int32_t code = pilot_pairing_host_accept(
-        outputPath,
-        "Pikmin Pilot",
-        timeoutSeconds,
-        PPPairingHostReady,
-        PPPairingHostPin,
-        message,
-        messageCapacity
-    );
-
-    NSString *result = (message != NULL && message[0] != '\0')
-        ? [NSString stringWithUTF8String:message]
-        : [NSString stringWithFormat:@"pairing result code %d", code];
-    PPStopPairingBonjour();
-    if (code == 0) {
-        PPSetPairingHostStatus([NSString stringWithFormat:@"STAGE 11.6.4 PAIRING COMPLETE ✅ • %@", result ?: @""]);
-    } else {
-        PPSetPairingHostStatus([NSString stringWithFormat:@"STAGE 11.6.4 PAIRING FAILED • %@", result ?: @""]);
-    }
-    return code;
-}
-
-int32_t PPGetPhoneLocalPairingHostStatus(char *message, size_t messageCapacity) {
-    PPWriteMessage(message, messageCapacity, PPGetPairingHostStatusText());
-    return 0;
-}
 
 static BOOL PPSendAll(int fd, const uint8_t *bytes, size_t length) {
     size_t offset = 0;

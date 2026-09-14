@@ -401,7 +401,6 @@ cp "$ROOT/RustPatch/pilot_xctest_metadata.rs" ffi/src/pilot_xctest_metadata.rs
 cp "$ROOT/RustPatch/pilot_xctest_execute.rs" ffi/src/pilot_xctest_execute.rs
 cp "$ROOT/RustPatch/pilot_runner_install.rs" ffi/src/pilot_runner_install.rs
 cp "$ROOT/RustPatch/pilot_ddi_mount.rs" ffi/src/pilot_ddi_mount.rs
-cp "$ROOT/RustPatch/pilot_pairing_host.rs" ffi/src/pilot_pairing_host.rs
 
 # Add a focused FFI-only feature under the existing [features] table.
 python3 - <<'PY'
@@ -429,7 +428,6 @@ mod pilot_xctest_metadata;
 mod pilot_xctest_execute;
 mod pilot_runner_install;
 mod pilot_ddi_mount;
-mod pilot_pairing_host;
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pilot_ddi_mount_personalized(
@@ -659,22 +657,6 @@ LIB="target/aarch64-apple-ios/release/libidevice_ffi.a"
 test -f "$LIB"
 ls -lh "$LIB"
 
-# Stage 11.6.2: cbindgen must expose pilot_pairing_host_accept with a plain
-# C callback ABI. 11.6.1 used Option<extern "C" fn>, which produced opaque
-# Option_ReadyCallback / Option_PinCallback wrappers and broke ObjC compilation.
-python3 - <<'PY2'
-from pathlib import Path
-import re
-h = Path("ffi/idevice.h").read_text(errors="replace")
-m = re.search(r"pilot_pairing_host_accept\s*\((.*?)\)\s*;", h, re.S)
-if not m:
-    raise SystemExit("Stage 11.6.2 ABI check: pilot_pairing_host_accept prototype missing from ffi/idevice.h")
-sig = m.group(1)
-if "Option_" in sig:
-    raise SystemExit("Stage 11.6.2 ABI check: pairing callback still leaked as cbindgen Option_* wrapper")
-print("Stage 11.6.2 pairing callback C ABI clean.")
-PY2
-
 # Apple nm may not understand every LLVM object emitted by current Rust;
 # use a format-agnostic archive string check instead.
 python3 - "$LIB" <<'PY'
@@ -682,7 +664,6 @@ from pathlib import Path
 import sys
 data = Path(sys.argv[1]).read_bytes()
 required = [
-    b"pilot_pairing_host_accept",
     b"pilot_xctest_service_probe",
     b"pilot_ddi_mount_personalized",
     b"pilot_xctest_dtx_bootstrap",
@@ -698,7 +679,7 @@ required = [
 missing = [name.decode() for name in required if name not in data]
 if missing:
     raise SystemExit("Missing Stage 7.8 export(s): " + ", ".join(missing))
-print("Stage 11.6.2 pairing-host + XCTest/DDI export set present.")
+print("Stage 10.2 XCTest tap/swipe/select12/configurable-dispatchtail export set present.")
 PY
 
 cp ffi/idevice.h "$HEADERS/idevice.h"
@@ -712,4 +693,4 @@ test -f "$OUT/Info.plist"
 test -f "$OUT/ios-arm64/libidevice_ffi.a"
 test -f "$OUT/ios-arm64/Headers/idevice.h"
 ls -lh "$OUT/ios-arm64/libidevice_ffi.a"
-echo "Built Stage 11.6.2 RPPairing + DDI + XCTest runtime $OUT"
+echo "Built Stage 8.2.2 DVT-to-XCTest Runner-handoff command set $OUT"

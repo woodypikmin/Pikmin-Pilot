@@ -11,25 +11,8 @@ targets:
   PikminPilot:
     type: application
     platform: iOS
-    # Stage 11.6.4: explicit source allowlist. Never scan the whole PikminPilot/
-    # directory, because overwrite-style GitHub uploads can leave stale stage folders
-    # and Info.plist files behind. Only these files are part of the live host target.
     sources:
-    - path: PikminPilot/ContentView.swift
-    - path: PikminPilot/DeveloperDiskImageStore.swift
-    - path: PikminPilot/FruitDetector.swift
-    - path: PikminPilot/IDeviceEngine.swift
-    - path: PikminPilot/ImageAutomationDetector.swift
-    - path: PikminPilot/NoVPNSelfTransportProbe.swift
-    - path: PikminPilot/PairingRecordStore.swift
-    - path: PikminPilot/PhoneLocalPairingBootstrap.swift
-    - path: PikminPilot/PikminPilotApp.swift
-    - path: PikminPilot/PikminTunnelManager.swift
-    - path: PikminPilot/PilotIDeviceBridge.m
-    - path: PikminPilot/PilotOptions.swift
-    - path: PikminPilot/PilotTransport.swift
-    - path: PikminPilot/RunnerPackageStore.swift
-    - path: PikminPilot/Stage8FullLoopController.swift
+    - path: PikminPilot
     info:
       path: PikminPilot/Info.plist
     dependencies:
@@ -39,7 +22,6 @@ targets:
     - sdk: Network.framework
     - sdk: NetworkExtension.framework
     - sdk: SystemConfiguration.framework
-    - sdk: UserNotifications.framework
     - target: PikminPilotTunnel
       embed: true
     settings:
@@ -58,8 +40,8 @@ targets:
         - -lc++
         - -lz
         CODE_SIGN_STYLE: Manual
-        CURRENT_PROJECT_VERSION: '1164'
-        MARKETING_VERSION: '11.6.4'
+        CURRENT_PROJECT_VERSION: '1154'
+        MARKETING_VERSION: '11.5.4'
     scheme:
       testTargets:
       - PikminPilotRunnerUITests
@@ -69,8 +51,7 @@ targets:
     type: app-extension
     platform: iOS
     sources:
-    - path: PikminPilotTunnel/PacketTunnelProvider.swift
-    - path: PikminPilotTunnel/TunnelConstants.swift
+    - path: PikminPilotTunnel
     dependencies:
     - sdk: NetworkExtension.framework
     settings:
@@ -83,13 +64,13 @@ targets:
         SKIP_INSTALL: YES
         APPLICATION_EXTENSION_API_ONLY: YES
         CODE_SIGN_STYLE: Manual
-        CURRENT_PROJECT_VERSION: '1164'
-        MARKETING_VERSION: '11.6.4'
+        CURRENT_PROJECT_VERSION: '1154'
+        MARKETING_VERSION: '11.5.4'
   PikminPilotRunnerUITests:
     type: bundle.ui-testing
     platform: iOS
     sources:
-    - path: PikminPilotRunnerUITests/PikminPilotRunnerUITests.swift
+    - path: PikminPilotRunnerUITests
     dependencies:
     - target: PikminPilot
     settings:
@@ -100,5 +81,5 @@ targets:
         TEST_TARGET_NAME: PikminPilot
         GENERATE_INFOPLIST_FILE: true
         CODE_SIGN_STYLE: Automatic
-        CURRENT_PROJECT_VERSION: '1164'
-        MARKETING_VERSION: '11.6.4'
+        CURRENT_PROJECT_VERSION: '1153'
+        MARKETING_VERSION: '11.5.3'

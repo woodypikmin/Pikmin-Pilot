@@ -45,7 +45,7 @@ final class PairingRecordStore: ObservableObject {
         }
     }
 
-    /// Stage 11.6.4 one-tap bootstrap recovery order:
+    /// Stage 11.4.0 one-tap bootstrap order:
     /// 1. Existing app-container copy (normal updates preserve this)
     /// 2. Best-effort Keychain recovery copy
     /// 3. Optional per-device pairing record embedded by private CI
@@ -109,35 +109,6 @@ final class PairingRecordStore: ObservableObject {
         }
         deleteKeychainBackup()
         refresh()
-    }
-
-    /// Stage 11.6.4 diagnostic helper. Temporarily removes only the Documents
-    /// working copy while intentionally leaving Keychain recovery untouched.
-    /// If the probe crashes or is killed, the next launch can still recover the
-    /// known-good record from Keychain.
-    func suspendWorkingCopyForPairingProbe() throws -> Data? {
-        let url = destinationURL
-        let baseline: Data?
-        if FileManager.default.fileExists(atPath: url.path) {
-            baseline = try Data(contentsOf: url)
-            try FileManager.default.removeItem(at: url)
-        } else {
-            baseline = nil
-        }
-        refresh()
-        return baseline
-    }
-
-    /// Restores the in-memory baseline after an unsuccessful pairing probe.
-    /// Keychain recovery is preserved throughout the probe as a second safety net.
-    func restoreWorkingCopyAfterPairingProbe(_ baseline: Data?) throws {
-        guard let baseline, !baseline.isEmpty else {
-            refresh()
-            return
-        }
-        try writeLocalCopy(baseline)
-        refresh()
-        _ = backupCurrentRecordToKeychain()
     }
 
     private func bootstrapLocalCopy() {

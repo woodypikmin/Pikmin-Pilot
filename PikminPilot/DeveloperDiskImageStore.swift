@@ -29,10 +29,10 @@ actor DeveloperDiskImageStore {
                 let total = Self.byteLabel(totalBytes)
                 let pct = percent ?? 0
                 let resume = resumedFromBytes > 0 ? " • resumed" : ""
-                return "STAGE 11.6.4 DDI ASSET • \(fileName) • \(pct)% • \(received) / \(total)\(resume)"
+                return "STAGE 11.3.2 DDI ASSET • \(fileName) • \(pct)% • \(received) / \(total)\(resume)"
             }
             let resume = resumedFromBytes > 0 ? " • resumed" : ""
-            return "STAGE 11.6.4 DDI ASSET • \(fileName) • \(received)\(resume)"
+            return "STAGE 11.3.2 DDI ASSET • \(fileName) • \(received)\(resume)"
         }
 
         private static func byteLabel(_ bytes: Int64) -> String {

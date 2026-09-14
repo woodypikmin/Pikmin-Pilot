@@ -37,15 +37,15 @@ final class PikminTunnelManager: ObservableObject {
     @Published private(set) var providerBundleID = "—"
     @Published private(set) var lastErrorDiagnostics = ""
 
-    let deviceIP = "10.7.0.0"
+    let deviceIP = "10.7.1.1"
     let fakeIP = "10.7.0.1"
-    let subnetMask = "255.255.255.0"
+    let subnetMask = "255.255.255.255"
 
     private let deviceIPKey = "TunnelDeviceIP"
     private let fakeIPKey = "TunnelFakeIP"
     private let subnetMaskKey = "TunnelSubnetMask"
     private let reflectorRevisionKey = "ReflectorRevision"
-    private let reflectorRevision = "pikminpilot-localdevvpn-reflector-stage11.2.2"
+    private let reflectorRevision = "pikminpilot-cellular-p2p-reflector-stage11.5.4"
     private var manager: NETunnelProviderManager?
     private var statusObserver: NSObjectProtocol?
 
@@ -164,7 +164,7 @@ final class PikminTunnelManager: ObservableObject {
             break
         default:
             state = .connecting
-            detail = "啟動內建 LocalDevVPN reflector：10.7.0.0 ⇄ 10.7.0.1"
+            detail = "啟動內建 cellular-safe P2P reflector：10.7.1.1/32 ⇄ 10.7.0.1/32"
             let options: [String: NSObject] = [
                 deviceIPKey: deviceIP as NSString,
                 fakeIPKey: fakeIP as NSString,
@@ -177,7 +177,7 @@ final class PikminTunnelManager: ObservableObject {
         while Date() < deadline {
             syncPublishedState()
             if localManager.connection.status == .connected {
-                detail = "內建 LocalDevVPN reflector 已連線 • device=10.7.0.0 • fake=10.7.0.1"
+                detail = "內建 P2P reflector 已連線 • iface=10.7.1.1/32 • peer=10.7.0.1/32"
                 return
             }
             if localManager.connection.status == .invalid {
@@ -280,7 +280,7 @@ final class PikminTunnelManager: ObservableObject {
             detail = "內建 tunnel 連線中…"
         case .connected:
             state = .connected
-            detail = "內建 LocalDevVPN reflector 已連線 • target=10.7.0.1:49152"
+            detail = "內建 cellular-safe P2P reflector 已連線 • target=10.7.0.1:49152"
         case .reasserting:
             state = .connecting
             detail = "內建 tunnel reasserting…"

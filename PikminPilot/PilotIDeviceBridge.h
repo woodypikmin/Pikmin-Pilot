@@ -7,26 +7,6 @@
 extern "C" {
 #endif
 
-/// Stage 11.6.4: starts an iOS 27+ device-initiated RPPairing host entirely
-/// inside Pikmin Pilot. The Rust responder owns TCP + RPPairing; Foundation
-/// NetService publishes the Bonjour record to avoid raw multicast sockets.
-/// This call blocks until pairing succeeds, fails, or timeoutSeconds elapses,
-/// so Swift must call it off the main thread. On success outputPath contains
-/// rp_pairing_file.plist.
-int32_t PPStartPhoneLocalPairingHost(
-    const char *outputPath,
-    uint64_t timeoutSeconds,
-    char *message,
-    size_t messageCapacity
-);
-
-/// Returns the latest asynchronous pairing-host status (Bonjour ready / PIN /
-/// completion) for display while PPStartPhoneLocalPairingHost is blocking.
-int32_t PPGetPhoneLocalPairingHostStatus(
-    char *message,
-    size_t messageCapacity
-);
-
 /// Returns 0 on success. Writes a human-readable result into message.
 int32_t PPValidateRPPairingFile(
     const char *path,

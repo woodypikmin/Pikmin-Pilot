@@ -119,7 +119,7 @@ struct ContentView: View {
                             let shouldResumeStart = pendingStartAfterPairingImport
                             pendingStartAfterPairingImport = false
                             if shouldResumeStart {
-                                status = "STAGE 11.6.4 FIRST SETUP ✅ • Pairing Record saved • continuing START PILOT automatically…"
+                                status = "STAGE 11.5.4 FIRST SETUP ✅ • Pairing Record saved • continuing START PILOT automatically…"
                                 Task { await startStage101Auto() }
                             } else {
                                 status = "Pairing Record 已匯入 ✅ • 正在自動 Validate + probe RSD 10.7.0.1:49152…"
@@ -157,7 +157,7 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Pikmin Pilot")
                         .font(.title2.bold())
-                    Text("Stage 11.6.4 • One-Tap Bootstrap")
+                    Text("Stage 11.5.4 • 11.5.3 Core + Cellular Loopback")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
@@ -479,7 +479,7 @@ struct ContentView: View {
                 .buttonStyle(.bordered)
                 .disabled(loop.isRunning || busy)
 
-                Text("START PILOT 會自動啟動 Tunnel、建立 RSD、掛 DDI、確認/安裝 Runner。既有 Pairing 會自動沿用/secure recovery；iOS 27+ 缺 Pairing 時會直接啟動手機端 Pairable Host，完成系統 Pairing 後自動續跑。")
+                Text("START PILOT 會自動啟動 Tunnel、建立 RSD、掛 DDI、確認/安裝 Runner。Pairing Record 只需要首次提供一次；後續正常覆蓋更新會沿用本機副本，11.4.0 另做 best-effort secure recovery。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
@@ -496,16 +496,6 @@ struct ContentView: View {
                     Task { await validatePairing() }
                 }
                 .disabled(loop.isRunning || busy || pairing.pairingURL == nil)
-
-                Button("TEST PHONE-LOCAL PAIRING BOOTSTRAP") {
-                    Task { await runForcedPhoneLocalPairingProbe() }
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(loop.isRunning || busy)
-
-                Text("11.6.4 probe：會安全保留目前可用的 Pairing recovery，只暫時隱藏 working copy，並在 iOS 26/27 都強制啟動 Pairable Host。失敗或逾時會自動恢復原本 Pairing。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
 
                 Divider()
 
@@ -706,23 +696,14 @@ struct ContentView: View {
 
         if pairing.pairingURL == nil {
             if pairing.ensureAvailableFromRecoverySources(), pairing.pairingURL != nil {
-                status = "STAGE 11.6.4 ONE-TAP • Pairing recovered automatically ✅ • continuing…"
+                status = "STAGE 11.5.4 ONE-TAP • Pairing recovered automatically ✅ • continuing…"
                 await startStage101Auto()
                 return
             }
 
-            if PhoneLocalPairingBootstrap.isSystemSupported {
-                await startPhoneLocalPairingBootstrapAndResume()
-                return
-            }
-
-            // Stock iOS/iPadOS before 27 does not expose the device-initiated
-            // wireless pairing onboarding used by the on-device Pairable Host.
-            // Keep the proven import fallback for existing iOS 26 users rather
-            // than pretending an unsupported bootstrap can succeed.
             pendingStartAfterPairingImport = true
             fileImportTarget = .pairing
-            status = "STAGE 11.6.4 FIRST SETUP • this iOS version cannot start wireless RPPairing from zero on-device • import an existing RPPairing Record once; START PILOT will then continue automatically"
+            status = "STAGE 11.5.4 FIRST SETUP • select the RPPairing Record once; after import START PILOT will continue automatically"
             showFileImporter = true
             return
         }
@@ -731,156 +712,20 @@ struct ContentView: View {
     }
 
     @MainActor
-    private func runForcedPhoneLocalPairingProbe() async {
-        guard !busy else { return }
-        busy = true
-        pendingStartAfterPairingImport = false
-
-        let os = ProcessInfo.processInfo.operatingSystemVersion
-        status = "STAGE 11.6.4 PAIRING PROBE • safely holding current pairing • forcing Pairable Host on iOS \(os.majorVersion).\(os.minorVersion).\(os.patchVersion)…"
-
-        let baseline: Data?
-        do {
-            baseline = try pairing.suspendWorkingCopyForPairingProbe()
-        } catch {
-            busy = false
-            status = "STAGE 11.6.4 PAIRING PROBE FAILED • could not suspend working copy • \(error.localizedDescription)"
-            return
-        }
-
-        // Notification permission is best-effort. A generated PIN is also exposed
-        // through currentStatus() while the probe is running.
-        _ = await PhoneLocalPairingBootstrap.requestPinNotificationPermission()
-
-        let backgroundTask = UIApplication.shared.beginBackgroundTask(
-            withName: "PikminPilot.RPPairingProbe",
-            expirationHandler: nil
-        )
-        defer {
-            if backgroundTask != .invalid {
-                UIApplication.shared.endBackgroundTask(backgroundTask)
-            }
-        }
-
-        status = "STAGE 11.6.4 PAIRING PROBE • starting TCP responder + Bonjour on this phone…"
-        let outputURL = pairing.destinationURL
-        let worker = Task.detached(priority: .userInitiated) {
-            PhoneLocalPairingBootstrap.run(outputURL: outputURL, timeoutSeconds: 90)
-        }
-        let poller = Task { @MainActor in
-            while !Task.isCancelled {
-                let current = PhoneLocalPairingBootstrap.currentStatus()
-                if !current.isEmpty {
-                    status = current + " • PROBE=iOS \(os.majorVersion).\(os.minorVersion)"
-                }
-                try? await Task.sleep(nanoseconds: 250_000_000)
-            }
-        }
-
-        let result = await worker.value
-        poller.cancel()
-
-        if result.ok {
-            pairing.refresh()
-            if pairing.pairingURL != nil {
-                _ = pairing.backupCurrentRecordToKeychain()
-                busy = false
-                status = "STAGE 11.6.4 PAIRING PROBE SUCCESS ✅ • a NEW phone-local rp_pairing_file.plist was generated on iOS \(os.majorVersion).\(os.minorVersion).\(os.patchVersion) • \(result.message)"
-                return
-            }
-        }
-
-        do {
-            // Discard any partial output and restore the proven baseline.
-            if FileManager.default.fileExists(atPath: pairing.destinationURL.path) {
-                try FileManager.default.removeItem(at: pairing.destinationURL)
-            }
-            try pairing.restoreWorkingCopyAfterPairingProbe(baseline)
-            busy = false
-            status = "STAGE 11.6.4 PAIRING PROBE FAILED • \(result.message) • previous working pairing restored ✅"
-        } catch {
-            pairing.refresh()
-            busy = false
-            status = "STAGE 11.6.4 PAIRING PROBE FAILED • \(result.message) • automatic working-copy restore failed: \(error.localizedDescription) • Keychain recovery was intentionally preserved"
-        }
-    }
-
-    @MainActor
-    private func startPhoneLocalPairingBootstrapAndResume() async {
-        guard pairing.pairingURL == nil else {
-            await startStage101Auto()
-            return
-        }
-
-        busy = true
-        pendingStartAfterPairingImport = false
-        status = "STAGE 11.6.4 FIRST SETUP • preparing phone-local RPPairing host…"
-
-        // Best effort only: if the user denies notifications, pairing still
-        // works, but the PIN must be read by app-switching back to Pikmin Pilot.
-        let notificationsAllowed = await PhoneLocalPairingBootstrap.requestPinNotificationPermission()
-        status = notificationsAllowed
-            ? "STAGE 11.6.4 FIRST SETUP • PIN notifications ready • starting Pairable Host…"
-            : "STAGE 11.6.4 FIRST SETUP • notifications unavailable; Pairable Host will still run and show the PIN in this status view"
-
-        let backgroundTask = UIApplication.shared.beginBackgroundTask(
-            withName: "PikminPilot.RPPairing",
-            expirationHandler: nil
-        )
-        defer {
-            if backgroundTask != .invalid {
-                UIApplication.shared.endBackgroundTask(backgroundTask)
-            }
-        }
-
-        let outputURL = pairing.destinationURL
-        let worker = Task.detached(priority: .userInitiated) {
-            PhoneLocalPairingBootstrap.run(outputURL: outputURL, timeoutSeconds: 180)
-        }
-        let poller = Task { @MainActor in
-            while !Task.isCancelled {
-                let current = PhoneLocalPairingBootstrap.currentStatus()
-                if !current.isEmpty {
-                    status = current
-                }
-                try? await Task.sleep(nanoseconds: 250_000_000)
-            }
-        }
-
-        let result = await worker.value
-        poller.cancel()
-        busy = false
-
-        guard result.ok else {
-            status = "STAGE 11.6.4 PAIRING FAILED • \(result.message)"
-            return
-        }
-
-        pairing.refresh()
-        guard pairing.pairingURL != nil else {
-            status = "STAGE 11.6.4 PAIRING FAILED • responder returned success but rp_pairing_file.plist was not found"
-            return
-        }
-        _ = pairing.backupCurrentRecordToKeychain()
-        status = "STAGE 11.6.4 PAIRING COMPLETE ✅ • saved locally + secure recovery • continuing START PILOT automatically…"
-        await startStage101Auto()
-    }
-
-    @MainActor
     private func startStage101Auto() async {
         guard let url = pairing.pairingURL else { return }
         busy = true
-        status = "STAGE 11.6.4 START • \(runSummaryLabel) • integrated tunnel → RSD → DDI preflight → Runner → stable 10.3.1 loop"
+        status = "STAGE 11.5.4 START • \(runSummaryLabel) • integrated tunnel → RSD → DDI preflight → Runner → stable 10.3.1 loop"
 
         var tunnelNote = "integrated=not-attempted"
         do {
             try await tunnel.ensureStarted(timeoutSeconds: 10.0)
             tunnelNote = "integrated=connected"
-            status = "STAGE 11.6.4 • integrated tunnel ✅ • probing phone-local RSD…"
+            status = "STAGE 11.5.4 • integrated tunnel ✅ • probing phone-local RSD…"
         } catch {
             let diag = tunnel.diagnostics(for: error)
             tunnelNote = "integrated=unavailable"
-            status = "STAGE 11.6.4 • integrated tunnel unavailable (\(diag)) • trying existing external LocalDevVPN path…"
+            status = "STAGE 11.5.4 • integrated tunnel unavailable (\(diag)) • trying existing external LocalDevVPN path…"
         }
 
         let engine = IDeviceEngine(pairingPath: url.path)
@@ -888,15 +733,15 @@ struct ContentView: View {
         rsdReady = rsd.ok
         guard rsd.ok else {
             busy = false
-            status = "STAGE 11.6.4 WAITING FOR TUNNEL • \(tunnelNote) • RSD offline • integrated tunnel is unavailable; external LocalDevVPN remains a temporary fallback • \(rsd.message)"
+            status = "STAGE 11.5.4 WAITING FOR TUNNEL • \(tunnelNote) • RSD offline • integrated tunnel is unavailable; external LocalDevVPN remains a temporary fallback • \(rsd.message)"
             return
         }
         _ = pairing.backupCurrentRecordToKeychain()
 
-        status = "STAGE 11.6.4 PREFLIGHT • RSD ✅ • checking developer services…"
+        status = "STAGE 11.5.4 PREFLIGHT • RSD ✅ • checking developer services…"
         var services = await engine.probeXCTestServices()
         if !services.ok {
-            status = "STAGE 11.6.4 PREFLIGHT • developer services missing after reboot • preparing Personalized DDI 27A5228h…"
+            status = "STAGE 11.5.4 PREFLIGHT • developer services missing after reboot • preparing Personalized DDI 27A5228h…"
 
             let assets: DeveloperDiskImageStore.Assets
             do {
@@ -905,11 +750,11 @@ struct ContentView: View {
                 }
             } catch {
                 busy = false
-                status = "STAGE 11.6.4 FAILED • phase=ddi-assets • \(error.localizedDescription)"
+                status = "STAGE 11.5.4 FAILED • phase=ddi-assets • \(error.localizedDescription)"
                 return
             }
 
-            status = "STAGE 11.6.4 DDI • source=\(assets.sourceLabel) • build=\(assets.buildID) • mounting through phone-local RSD…"
+            status = "STAGE 11.5.4 DDI • source=\(assets.sourceLabel) • build=\(assets.buildID) • mounting through phone-local RSD…"
             let mount = await engine.mountPersonalizedDDI(
                 imagePath: assets.imageURL.path,
                 buildManifestPath: assets.buildManifestURL.path,
@@ -917,71 +762,65 @@ struct ContentView: View {
             )
             guard mount.ok else {
                 busy = false
-                status = "STAGE 11.6.4 FAILED • phase=ddi-mount • \(mount.message)"
+                status = "STAGE 11.5.4 FAILED • phase=ddi-mount • \(mount.message)"
                 return
             }
 
-            status = "STAGE 11.6.4 DDI ✅ • \(mount.message) • rebuilding RSD…"
+            status = "STAGE 11.5.4 DDI ✅ • \(mount.message) • rebuilding RSD…"
             let postMountRSD = await engine.probeRSD()
             guard postMountRSD.ok else {
                 busy = false
-                status = "STAGE 11.6.4 FAILED • phase=post-ddi-rsd • \(postMountRSD.message)"
+                status = "STAGE 11.5.4 FAILED • phase=post-ddi-rsd • \(postMountRSD.message)"
                 return
             }
 
             services = await engine.probeXCTestServices()
             guard services.ok else {
                 busy = false
-                status = "STAGE 11.6.4 FAILED • phase=post-ddi-service-probe • DDI mount returned success but developer services are still absent • \(services.message)"
+                status = "STAGE 11.5.4 FAILED • phase=post-ddi-service-probe • DDI mount returned success but developer services are still absent • \(services.message)"
                 return
             }
         }
 
-        status = "STAGE 11.6.4 PREFLIGHT ✅ • RSD + DDI developer services ready • \(tunnelNote) • synchronizing XCTest Runner…"
+        status = "STAGE 11.5.4 PREFLIGHT ✅ • RSD + DDI developer services ready • \(tunnelNote) • synchronizing XCTest Runner…"
         var runner = await engine.discoverXCTestRunner()
 
         if runnerPackage.source == .embedded && runnerPackage.isEmbeddedRunnerExpired {
             busy = false
-            status = "STAGE 11.6.4 RUNNER EXPIRED • embedded provisioning expired • \(runnerPackage.provisioningStatus)"
+            status = "STAGE 11.5.4 RUNNER EXPIRED • embedded provisioning expired • \(runnerPackage.provisioningStatus)"
             return
         }
 
-        // Stage 11.6.4 is host/pairing-only. Keep the proven Stage 11.5.3
-        // Runner payload revision locked so an existing working Runner is not
-        // needlessly replaced just because the host app version advanced.
+        // Stage 11.5.3: an installed Runner is not enough. Previous builds only
+        // installed when the Runner was missing, so a host update could keep
+        // executing an older Runner forever. Synchronize once per host build.
         let hostBuild = (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String) ?? "unknown"
-        let runnerRevision = "1153-xfix"
-        let runnerSyncKey = "PikminPilot.syncedRunnerPayloadRevision"
-        let legacyRunnerSyncKey = "PikminPilot.syncedRunnerHostBuild"
-        if UserDefaults.standard.string(forKey: runnerSyncKey) == nil,
-           UserDefaults.standard.string(forKey: legacyRunnerSyncKey) == "1153" {
-            UserDefaults.standard.set(runnerRevision, forKey: runnerSyncKey)
-        }
-        let needsRunnerSync = !runner.ok || UserDefaults.standard.string(forKey: runnerSyncKey) != runnerRevision
+        let runnerSyncKey = "PikminPilot.syncedRunnerHostBuild"
+        let needsRunnerSync = !runner.ok || UserDefaults.standard.string(forKey: runnerSyncKey) != hostBuild
 
         if needsRunnerSync {
             guard let package = runnerPackage.runnerURL else {
                 busy = false
-                status = "STAGE 11.6.4 PACKAGING ERROR • embedded signed Runner missing"
+                status = "STAGE 11.5.4 PACKAGING ERROR • embedded signed Runner missing"
                 return
             }
-            status = "STAGE 11.6.4 RUNNER SYNC • hostBuild=\(hostBuild) • runnerRevision=\(runnerRevision) • source=\(runnerPackage.sourceLabel) • installing/upgrading…"
+            status = "STAGE 11.5.4 RUNNER SYNC • hostBuild=\(hostBuild) • source=\(runnerPackage.sourceLabel) • installing/upgrading…"
             let install = await engine.installXCTestRunnerIPA(localPath: package.path)
             guard install.ok else {
                 busy = false
-                status = "STAGE 11.6.4 FAILED • phase=runner-sync • \(install.message)"
+                status = "STAGE 11.5.4 FAILED • phase=runner-sync • \(install.message)"
                 return
             }
             runner = await engine.discoverXCTestRunner()
             guard runner.ok else {
                 busy = false
-                status = "STAGE 11.6.4 FAILED • phase=runner-sync-verify • \(runner.message)"
+                status = "STAGE 11.5.4 FAILED • phase=runner-sync-verify • \(runner.message)"
                 return
             }
-            UserDefaults.standard.set(runnerRevision, forKey: runnerSyncKey)
-            status = "STAGE 11.6.4 RUNNER SYNC ✅ • hostBuild=\(hostBuild) • runnerRevision=\(runnerRevision) • verified current embedded Runner"
+            UserDefaults.standard.set(hostBuild, forKey: runnerSyncKey)
+            status = "STAGE 11.5.4 RUNNER SYNC ✅ • hostBuild=\(hostBuild) • verified current embedded Runner"
         } else {
-            status = "STAGE 11.6.4 RUNNER ✅ • hostBuild=\(hostBuild) • runnerRevision=\(runnerRevision) • Stage 11.5.3 Runner preserved"
+            status = "STAGE 11.5.4 RUNNER ✅ • hostBuild=\(hostBuild) • current Runner already synchronized"
         }
 
         busy = false
@@ -1006,13 +845,13 @@ struct ContentView: View {
     private func startIntegratedTunnelOnly() async {
         busy = true
         defer { busy = false }
-        status = "STAGE 11.6.4 TUNNEL • creating/loading paid PacketTunnelProvider configuration…"
+        status = "STAGE 11.5.4 TUNNEL • creating/loading paid PacketTunnelProvider configuration…"
         do {
             try await tunnel.ensureStarted(timeoutSeconds: 12.0)
-            status = "STAGE 11.6.4 TUNNEL CONNECTED ✅ • peer=10.7.0.1/32 • next=RSD 10.7.0.1:49152"
+            status = "STAGE 11.5.4 TUNNEL CONNECTED ✅ • iface=10.7.1.1/32 • peer=10.7.0.1/32 • cellular-safe route • next=RSD 10.7.0.1:49152"
         } catch {
             let diag = tunnel.diagnostics(for: error)
-            status = "STAGE 11.6.4 TUNNEL FAILED • \(diag) • paid-signed tunnel failed; COPY LOG and keep external LocalDevVPN only as a temporary fallback"
+            status = "STAGE 11.5.4 TUNNEL FAILED • \(diag) • paid-signed tunnel failed; COPY LOG and keep external LocalDevVPN only as a temporary fallback"
         }
     }
 
@@ -1021,12 +860,12 @@ struct ContentView: View {
         busy = true
         defer { busy = false }
         rsdReady = false
-        status = "STAGE 11.6.4 • hard-restarting PacketTunnelProvider session…"
+        status = "STAGE 11.2.3 • hard-restarting PacketTunnelProvider session…"
         do {
             try await tunnel.restartFresh(timeoutSeconds: 15.0)
-            status = "STAGE 11.6.4 TUNNEL FRESH ✅ • device=10.7.0.0 • fake=10.7.0.1 • next=RSD 10.7.0.1:49152"
+            status = "STAGE 11.5.4 TUNNEL FRESH ✅ • iface=10.7.1.1/32 • peer=10.7.0.1/32 • next=RSD 10.7.0.1:49152"
         } catch {
-            status = "STAGE 11.6.4 TUNNEL RESTART FAILED • \(tunnel.diagnostics(for: error))"
+            status = "STAGE 11.2.3 TUNNEL RESTART FAILED • \(tunnel.diagnostics(for: error))"
         }
     }
 
