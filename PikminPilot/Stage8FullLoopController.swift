@@ -30,7 +30,7 @@ final class Stage8FullLoopController: ObservableObject {
     private var backgroundGeneration: UInt64 = 0
     private var renewalInProgress = false
     private var criticalTailInProgress = false
-    // Stage 11.5.4.10: once a dispatch has left the expedition list, Pilot is
+    // Stage 11.5.4.11: once a dispatch has left the expedition list, Pilot is
     // forbidden from foregrounding itself until Runner has positively closed
     // the carrying green X and hands control back. This prevents a background
     // renewal/checkpoint from stealing foreground before the close tap.
@@ -80,7 +80,7 @@ final class Stage8FullLoopController: ObservableObject {
         }
     }
 
-    // Stage 11.5.4.10: run the same verified 10.3.1 automation core on an
+    // Stage 11.5.4.11: run the same verified 10.3.1 automation core on an
     // already-established persistent RSD session. This is the cellular escape
     // path: no operation below is allowed to reconnect to RemotePairing :49152.
     func startPersistent(
@@ -114,7 +114,7 @@ final class Stage8FullLoopController: ObservableObject {
 
         beginBackgroundWindow(label: "persistent-cellular")
         let goal = self.targetDispatches.map(String.init) ?? "∞"
-        emit("STAGE 11.5.4.10 PERSISTENT CELLULAR RUN START • automation-core=10.3.1 • transport=\(transportLabel) • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • RPPairing-reconnect=DISABLED")
+        emit("STAGE 11.5.4.11 PERSISTENT CELLULAR RUN START • automation-core=10.3.1 • transport=\(transportLabel) • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • RPPairing-reconnect=DISABLED")
 
         worker = Task { [weak self] in
             guard let self else { return }
@@ -270,27 +270,26 @@ final class Stage8FullLoopController: ObservableObject {
                 ) else {
                     consecutiveEmptyFullScans += 1
 
-                    // Stage 11.5.4.10: a transient detector/list refresh miss must
-                    // never be reported as completion. Retry the SAME round.
-                    if targetDispatches != nil && consecutiveEmptyFullScans <= 3 {
-                        setPhase("暫時找不到項目，重試第 \(consecutiveEmptyFullScans) 次")
-                        emit("ROUND \(round) RETRY • requested=\(requested) • completed=\(completedDispatches) • no safe AVAILABLE after full scan • retry=\(consecutiveEmptyFullScans)/3 • COMPLETE=NO")
+                    // Stage 11.5.4.11 HARD COUNT LATCH: a finite target is a
+                    // contract, not a best-effort loop. A detector/list refresh
+                    // miss is recoverable and MUST NOT end a 5/5 (or N/N) run.
+                    // Stay on the same round until an item appears, the user
+                    // stops the run, or an actual XCTest/transport error occurs.
+                    if targetDispatches != nil {
+                        setPhase("暫時找不到項目，保持第 \(round) 輪")
+                        emit("ROUND \(round) RETRY • requested=\(requested) • completed=\(completedDispatches) • no safe AVAILABLE after full scan • retry=\(consecutiveEmptyFullScans) • TARGET-LATCH=HOLD • COMPLETE=NO")
+
                         let reactivate = await engine.runXCTestActivateOnly()
                         if !reactivate.ok {
                             throw LoopError("Round \(round): retry reactivate failed • \(reactivate.message)")
                         }
-                        await pause(fastMode ? 0.55 : 0.90)
+
+                        let longSettle = consecutiveEmptyFullScans % 3 == 0
+                        await pause(longSettle ? (fastMode ? 1.15 : 1.80) : (fastMode ? 0.55 : 0.90))
                         continue
                     }
 
-                    if targetDispatches != nil {
-                        setPhase("未完成：目前找不到可搬運項目")
-                        emit("INCOMPLETE • requested=\(requested) • completed=\(completedDispatches) • reason=no safe AVAILABLE after \(consecutiveEmptyFullScans) full scans • COMPLETE=NO")
-                        finish()
-                        return
-                    }
-
-                    // Infinite mode waits instead of silently terminating.
+                    // Infinite mode also waits instead of silently terminating.
                     setPhase("等待新的可搬運項目")
                     emit("WAITING • mode=infinite • completed=\(completedDispatches) • no safe AVAILABLE • retrying")
                     consecutiveEmptyFullScans = 0
@@ -312,8 +311,17 @@ final class Stage8FullLoopController: ObservableObject {
                 if cancelled { break }
 
                 setPhase("回到探險列表")
-                guard try await waitForExpeditionList(engine: engine, attempts: 20) else {
-                    throw LoopError("Round \(round): Expedition list did not return after green X")
+                // The post-tail GREEN-X DOUBLE-ACK already proved the list on
+                // two consecutive live frames. Keep this legacy list check only
+                // as a soft sanity probe; a transient detector miss must never
+                // terminate a finite target halfway through.
+                if !(try await waitForExpeditionList(engine: engine, attempts: 8)) {
+                    emit("ROUND \(round) • LIST SOFT-MISS after verified green-X close • keeping target latch alive")
+                    let reactivate = await engine.runXCTestActivateOnly()
+                    if !reactivate.ok {
+                        throw LoopError("Round \(round): list soft-recovery reactivate failed • \(reactivate.message)")
+                    }
+                    await pause(fastMode ? 0.40 : 0.70)
                 }
 
                 if stopAfterCurrentRequested {
@@ -489,7 +497,7 @@ final class Stage8FullLoopController: ObservableObject {
         )
         await pause(fastMode ? 1.45 : 2.0)
 
-        // Stage 11.5.4.10 FOREGROUND LOCK: do NOT foreground Pikmin Pilot here.
+        // Stage 11.5.4.11 FOREGROUND LOCK: do NOT foreground Pikmin Pilot here.
         // 11.5.4.9 could renew/checkpoint Pilot between the expedition detail and
         // the carrying-close tail, which occasionally stole foreground before X.
         // The background budget was renewed at the safe list boundary above.
@@ -611,24 +619,120 @@ final class Stage8FullLoopController: ObservableObject {
             throw LoopError("phase=runner-handoff • verified Runner did not return Pilot foreground; leaving Pikmin Bloom visible for diagnosis")
         }
 
-        // Runner only activates Pilot after its own verified green-X close. From
-        // this point foreground renewal is safe again.
-        gameplayForegroundLock = false
-
+        // Stage 11.5.4.11 SECOND ACK: Runner 1153-xfix remains untouched.
+        // Do not trust a single "X disappeared" observation as the final truth:
+        // a transient detector miss inside Runner can otherwise foreground Pilot
+        // even though the carrying X is still visible. Keep the foreground lock
+        // until Pilot independently re-enters Pikmin and verifies the list.
         if backgroundExpiredDuringCriticalTail {
-            emit("ROUND \(round) • Runner handoff recovered an expired background window ✅")
+            emit("ROUND \(round) • Runner handoff recovered an expired background window; second green-X ACK pending")
         } else {
-            emit("ROUND \(round) • Runner→Pilot foreground handoff ✅")
+            emit("ROUND \(round) • Runner→Pilot handoff received • second green-X ACK pending")
         }
 
-        beginBackgroundWindow(label: "post-tail-r\(round)")
+        // Pilot is foreground now, so refresh its finite background budget before
+        // sending Pikmin back to foreground for the independent close check.
+        beginBackgroundWindow(label: "post-tail-verify-r\(round)")
         backgroundExpiredDuringCriticalTail = false
 
         let reactivate = await engine.runXCTestActivateOnly()
         guard reactivate.ok else {
             throw LoopError("phase=runner-handoff-reactivate-pikmin • \(reactivate.message)")
         }
-        emit("ROUND \(round) • Pikmin re-activated for next list scan ✅")
+
+        try await verifyCarryingCloseAfterRunnerHandoff(engine: engine, round: round)
+
+        // Only a positively verified expedition-list return releases the lock.
+        gameplayForegroundLock = false
+        emit("ROUND \(round) • GREEN-X DOUBLE-ACK ✅ • expedition list verified • foreground lock released")
+    }
+
+    private func verifyCarryingCloseAfterRunnerHandoff(
+        engine: IDeviceEngine,
+        round: Int
+    ) async throws {
+        setPhase("確認綠色 X 已關閉")
+        await pause(fastMode ? 0.16 : 0.26)
+
+        var closeTapAttempts = 0
+        var listReadyStreak = 0
+        var noCloseFrames = 0
+        let maxCloseTapAttempts = 6
+        let maxFrames = 30
+
+        for frameIndex in 0..<maxFrames {
+            try checkCancelled()
+
+            let image = try await capture(engine: engine, tag: "post-tail-green-x-ack")
+            screenshotSink?(image)
+
+            // Prefer the calibrated strict detector. Never let the broad green
+            // detector tap first on a real expedition-list frame, where unrelated
+            // green objects may exist. The broad fallback is only allowed after
+            // list detection also says this is NOT the list, and only inside the
+            // lower-left carrying-control zone.
+            var closePoint = ImageAutomationDetector.detectCarryingClose(in: image)
+            var listEvidence = false
+
+            if closePoint == nil {
+                let detection = await FruitDetector.detect(in: image)
+                listEvidence = !detection.fruits.isEmpty ||
+                    !detection.seedlings.isEmpty ||
+                    !detection.cards.isEmpty ||
+                    !detection.blockedObjects.isEmpty
+
+                if !listEvidence,
+                   frameIndex >= 2,
+                   let broad = ImageAutomationDetector.detectCarryingCloseBroad(in: image),
+                   let cg = image.cgImage {
+                    let nx = Double(broad.x) / Double(cg.width)
+                    let ny = Double(broad.y) / Double(cg.height)
+                    if nx <= 0.30 && ny >= 0.65 {
+                        closePoint = broad
+                        emit("ROUND \(round) • POST-TAIL ACK broad lower-left X recovery candidate")
+                    }
+                }
+            }
+
+            if let closePoint {
+                listReadyStreak = 0
+                noCloseFrames = 0
+
+                guard closeTapAttempts < maxCloseTapAttempts else {
+                    throw LoopError("Round \(round): green X still visible after \(maxCloseTapAttempts) host-side verified retry taps")
+                }
+
+                closeTapAttempts += 1
+                emit("ROUND \(round) • POST-TAIL ACK found green X still visible ⚠️ • retry tap \(closeTapAttempts)/\(maxCloseTapAttempts)")
+                try await tap(
+                    engine: engine,
+                    pixel: closePoint,
+                    image: image,
+                    stage: "post-tail-green-x-retry",
+                    allowBackgroundRenewal: false
+                )
+                await pause(fastMode ? 0.18 : 0.30)
+                continue
+            }
+
+            noCloseFrames += 1
+            if listEvidence {
+                listReadyStreak += 1
+                if listReadyStreak >= 2 {
+                    emit("ROUND \(round) • POST-TAIL ACK list confirmed on 2 consecutive frames • retryTaps=\(closeTapAttempts)")
+                    return
+                }
+            } else {
+                listReadyStreak = 0
+            }
+
+            if frameIndex == 3 || frameIndex == 9 || frameIndex == 17 {
+                emit("ROUND \(round) • POST-TAIL ACK waiting • no-green-X-frames=\(noCloseFrames) • list-streak=\(listReadyStreak)")
+            }
+            await pause(fastMode ? 0.16 : 0.28)
+        }
+
+        throw LoopError("Round \(round): post-tail verification could not prove expedition-list return; completed count NOT incremented")
     }
 
     // MARK: - Detection / input helpers
@@ -827,7 +931,7 @@ final class Stage8FullLoopController: ObservableObject {
     private func ensureBackgroundBudget(
         engine: IDeviceEngine,
         stage: String,
-        minimumRemaining: Double = 12.0
+        minimumRemaining: Double = 20.0
     ) async throws {
         guard UIApplication.shared.applicationState != .active else { return }
 
