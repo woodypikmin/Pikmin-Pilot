@@ -3,7 +3,7 @@ set -euo pipefail
 
 IPA="${1:?usage: make-release-kit.sh <signed-ipa> <output-dir>}"
 OUT="${2:?usage: make-release-kit.sh <signed-ipa> <output-dir>}"
-VERSION="${PIKMIN_RELEASE_VERSION:-11.5.4.11}"
+VERSION="${PIKMIN_RELEASE_VERSION:-11.5.4.12}"
 BUILD="${PIKMIN_RELEASE_BUILD:-1153}"
 PAIRING_MODE="${PIKMIN_PAIRING_MODE:-GENERIC}"
 

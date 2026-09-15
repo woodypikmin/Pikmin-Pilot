@@ -30,7 +30,7 @@ final class Stage8FullLoopController: ObservableObject {
     private var backgroundGeneration: UInt64 = 0
     private var renewalInProgress = false
     private var criticalTailInProgress = false
-    // Stage 11.5.4.11: once a dispatch has left the expedition list, Pilot is
+    // Stage 11.5.4.12: once a dispatch has left the expedition list, Pilot is
     // forbidden from foregrounding itself until Runner has positively closed
     // the carrying green X and hands control back. This prevents a background
     // renewal/checkpoint from stealing foreground before the close tap.
@@ -80,7 +80,7 @@ final class Stage8FullLoopController: ObservableObject {
         }
     }
 
-    // Stage 11.5.4.11: run the same verified 10.3.1 automation core on an
+    // Stage 11.5.4.12: run the same verified 10.3.1 automation core on an
     // already-established persistent RSD session. This is the cellular escape
     // path: no operation below is allowed to reconnect to RemotePairing :49152.
     func startPersistent(
@@ -114,7 +114,7 @@ final class Stage8FullLoopController: ObservableObject {
 
         beginBackgroundWindow(label: "persistent-cellular")
         let goal = self.targetDispatches.map(String.init) ?? "∞"
-        emit("STAGE 11.5.4.11 PERSISTENT CELLULAR RUN START • automation-core=10.3.1 • transport=\(transportLabel) • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • RPPairing-reconnect=DISABLED")
+        emit("STAGE 11.5.4.12 PERSISTENT CELLULAR RUN START • automation-core=10.3.1 • transport=\(transportLabel) • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • RPPairing-reconnect=DISABLED")
 
         worker = Task { [weak self] in
             guard let self else { return }
@@ -270,7 +270,7 @@ final class Stage8FullLoopController: ObservableObject {
                 ) else {
                     consecutiveEmptyFullScans += 1
 
-                    // Stage 11.5.4.11 HARD COUNT LATCH: a finite target is a
+                    // Stage 11.5.4.12 HARD COUNT LATCH: a finite target is a
                     // contract, not a best-effort loop. A detector/list refresh
                     // miss is recoverable and MUST NOT end a 5/5 (or N/N) run.
                     // Stay on the same round until an item appears, the user
@@ -497,7 +497,7 @@ final class Stage8FullLoopController: ObservableObject {
         )
         await pause(fastMode ? 1.45 : 2.0)
 
-        // Stage 11.5.4.11 FOREGROUND LOCK: do NOT foreground Pikmin Pilot here.
+        // Stage 11.5.4.12 FOREGROUND LOCK: do NOT foreground Pikmin Pilot here.
         // 11.5.4.9 could renew/checkpoint Pilot between the expedition detail and
         // the carrying-close tail, which occasionally stole foreground before X.
         // The background budget was renewed at the safe list boundary above.
@@ -619,7 +619,7 @@ final class Stage8FullLoopController: ObservableObject {
             throw LoopError("phase=runner-handoff • verified Runner did not return Pilot foreground; leaving Pikmin Bloom visible for diagnosis")
         }
 
-        // Stage 11.5.4.11 SECOND ACK: Runner 1153-xfix remains untouched.
+        // Stage 11.5.4.12 SECOND ACK: Runner 1153-xfix remains untouched.
         // Do not trust a single "X disappeared" observation as the final truth:
         // a transient detector miss inside Runner can otherwise foreground Pilot
         // even though the carrying X is still visible. Keep the foreground lock
