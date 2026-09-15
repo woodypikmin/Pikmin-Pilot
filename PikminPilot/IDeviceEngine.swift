@@ -35,6 +35,15 @@ actor IDeviceEngine {
         }
     }
 
+
+    /// Stage 11.5.4.3: prove whether the fixed RPPairing ingress socket itself
+    /// is reachable over cellular and record the kernel-selected source/interface.
+    func probeCellularRPPairingIngress() -> Result {
+        callBridgeWithoutPairing { message, capacity in
+            PPProbeCellularRPPairingIngress(message, capacity)
+        }
+    }
+
     func probeRSD() -> Result {
         callBridge { path, message, capacity in
             host.withCString { hostCString in

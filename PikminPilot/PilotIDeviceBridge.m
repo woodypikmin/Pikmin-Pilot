@@ -10,6 +10,8 @@
 #import <netdb.h>
 #import <unistd.h>
 #import <errno.h>
+#import <fcntl.h>
+#import <sys/select.h>
 
 
 
@@ -274,6 +276,166 @@ int32_t PPProbeCellularLockdownRoute(char *message, size_t messageCapacity) {
         result];
     PPWriteMessage(message, messageCapacity, text);
     return ready ? 0 : 1;
+}
+
+
+// Stage 11.5.4.3: distinguish the fixed RPPairing ingress socket from the
+// later createListener/device-socket hop hidden inside tunnel_create_rppairing.
+// This probe runs only after the normal tunnel already failed, so it cannot
+// mask a successful RSD session. It never sends RPPairing protocol bytes.
+static NSString *PPIPv4InterfaceNameForAddress(struct in_addr wanted) {
+    struct ifaddrs *interfaces = NULL;
+    if (getifaddrs(&interfaces) != 0 || interfaces == NULL) {
+        return @"?";
+    }
+
+    NSString *match = @"?";
+    for (struct ifaddrs *cursor = interfaces; cursor != NULL; cursor = cursor->ifa_next) {
+        if (cursor->ifa_addr == NULL || cursor->ifa_addr->sa_family != AF_INET) {
+            continue;
+        }
+        const struct sockaddr_in *sin = (const struct sockaddr_in *)cursor->ifa_addr;
+        if (sin->sin_addr.s_addr == wanted.s_addr) {
+            match = cursor->ifa_name != NULL
+                ? [NSString stringWithUTF8String:cursor->ifa_name]
+                : @"?";
+            break;
+        }
+    }
+    freeifaddrs(interfaces);
+    return match;
+}
+
+static NSString *PPCompactIPv4Interfaces(void) {
+    struct ifaddrs *interfaces = NULL;
+    if (getifaddrs(&interfaces) != 0 || interfaces == NULL) {
+        return @"ifs=?";
+    }
+
+    NSMutableArray<NSString *> *items = [NSMutableArray array];
+    for (struct ifaddrs *cursor = interfaces; cursor != NULL; cursor = cursor->ifa_next) {
+        if (cursor->ifa_addr == NULL || cursor->ifa_addr->sa_family != AF_INET) {
+            continue;
+        }
+        NSString *name = cursor->ifa_name != NULL
+            ? [NSString stringWithUTF8String:cursor->ifa_name]
+            : @"?";
+        if (![name isEqualToString:@"en0"] &&
+            ![name hasPrefix:@"pdp_ip"] &&
+            ![name hasPrefix:@"utun"] &&
+            ![name isEqualToString:@"lo0"]) {
+            continue;
+        }
+
+        char host[INET_ADDRSTRLEN] = {0};
+        const struct sockaddr_in *sin = (const struct sockaddr_in *)cursor->ifa_addr;
+        if (inet_ntop(AF_INET, &sin->sin_addr, host, sizeof(host)) == NULL) {
+            continue;
+        }
+        [items addObject:[NSString stringWithFormat:@"%@=%s", name, host]];
+    }
+    freeifaddrs(interfaces);
+    [items sortUsingSelector:@selector(compare:)];
+    return [NSString stringWithFormat:@"ifs=[%@]", [items componentsJoinedByString:@","]];
+}
+
+static NSString *PPProbeTCPIngress(NSString *host, uint16_t port, BOOL *connectedOut) {
+    if (connectedOut != NULL) {
+        *connectedOut = NO;
+    }
+
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        int e = errno;
+        return [NSString stringWithFormat:@"TCP=SOCKET-FAIL errno=%d %@", e, PPErrnoText(e)];
+    }
+
+    int oldFlags = fcntl(fd, F_GETFL, 0);
+    if (oldFlags >= 0) {
+        (void)fcntl(fd, F_SETFL, oldFlags | O_NONBLOCK);
+    }
+
+    struct sockaddr_in address;
+    memset(&address, 0, sizeof(address));
+#if defined(__APPLE__)
+    address.sin_len = sizeof(address);
+#endif
+    address.sin_family = AF_INET;
+    address.sin_port = htons(port);
+    if (inet_pton(AF_INET, host.UTF8String, &address.sin_addr) != 1) {
+        close(fd);
+        return @"TCP=BAD-ADDRESS";
+    }
+
+    int rc = connect(fd, (const struct sockaddr *)&address, sizeof(address));
+    if (rc != 0 && errno == EINPROGRESS) {
+        fd_set writeSet;
+        FD_ZERO(&writeSet);
+        FD_SET(fd, &writeSet);
+        struct timeval tv = { .tv_sec = 2, .tv_usec = 0 };
+        rc = select(fd + 1, NULL, &writeSet, NULL, &tv);
+        if (rc > 0 && FD_ISSET(fd, &writeSet)) {
+            int socketError = 0;
+            socklen_t errorLength = (socklen_t)sizeof(socketError);
+            if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &socketError, &errorLength) == 0 && socketError == 0) {
+                rc = 0;
+            } else {
+                errno = socketError != 0 ? socketError : errno;
+                rc = -1;
+            }
+        } else if (rc == 0) {
+            errno = ETIMEDOUT;
+            rc = -1;
+        } else {
+            rc = -1;
+        }
+    }
+
+    if (rc != 0) {
+        int e = errno;
+        close(fd);
+        return [NSString stringWithFormat:@"TCP=FAIL errno=%d %@", e, PPErrnoText(e)];
+    }
+
+    if (oldFlags >= 0) {
+        (void)fcntl(fd, F_SETFL, oldFlags);
+    }
+
+    struct sockaddr_in local;
+    memset(&local, 0, sizeof(local));
+    socklen_t localLength = (socklen_t)sizeof(local);
+    NSString *localText = @"?";
+    NSString *interfaceName = @"?";
+    if (getsockname(fd, (struct sockaddr *)&local, &localLength) == 0) {
+        char localHost[INET_ADDRSTRLEN] = {0};
+        if (inet_ntop(AF_INET, &local.sin_addr, localHost, sizeof(localHost)) != NULL) {
+            localText = [NSString stringWithFormat:@"%s:%u", localHost, ntohs(local.sin_port)];
+            interfaceName = PPIPv4InterfaceNameForAddress(local.sin_addr);
+        }
+    }
+
+    close(fd);
+    if (connectedOut != NULL) {
+        *connectedOut = YES;
+    }
+    return [NSString stringWithFormat:@"TCP=CONNECTED local=%@ if=%@", localText, interfaceName];
+}
+
+int32_t PPProbeCellularRPPairingIngress(char *message, size_t messageCapacity) {
+    BOOL peerConnected = NO;
+    NSString *peer = PPProbeTCPIngress(@"10.7.0.1", 49152, &peerConnected);
+
+    BOOL loopbackConnected = NO;
+    NSString *loopback = PPProbeTCPIngress(@"127.0.0.1", 49152, &loopbackConnected);
+
+    NSString *text = [NSString stringWithFormat:
+        @"CELLULAR RP INGRESS %@ • peer 10.7.0.1:49152 %@ • loopback 127.0.0.1:49152 %@ • %@",
+        peerConnected ? @"READY ✅" : @"FAILED ❌",
+        peer,
+        loopback,
+        PPCompactIPv4Interfaces()];
+    PPWriteMessage(message, messageCapacity, text);
+    return peerConnected ? 0 : 1;
 }
 
 int32_t PPNoVPNSelfTransportProbe(char *message, size_t messageCapacity) {

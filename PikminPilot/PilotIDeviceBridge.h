@@ -32,6 +32,15 @@ int32_t PPProbeCellularLockdownRoute(
     size_t messageCapacity
 );
 
+
+/// Stage 11.5.4.3 RPPairing ingress discriminator. Performs a TCP-only connect
+/// to 10.7.0.1:49152 after normal RPPairing has failed, reports the selected
+/// local source address/interface, and compares loopback. Sends no protocol bytes.
+int32_t PPProbeCellularRPPairingIngress(
+    char *message,
+    size_t messageCapacity
+);
+
 /// Creates an on-device RPPairing tunnel to host:port and performs an RSD
 /// handshake. Returns 0 on success.
 int32_t PPProbeRSD(

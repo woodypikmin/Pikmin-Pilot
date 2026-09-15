@@ -55,7 +55,7 @@ targets:
         - -lz
         CODE_SIGN_STYLE: Manual
         CURRENT_PROJECT_VERSION: '1153'
-        MARKETING_VERSION: '11.5.4.2'
+        MARKETING_VERSION: '11.5.4.3'
     scheme:
       testTargets:
       - PikminPilotRunnerUITests
@@ -65,7 +65,8 @@ targets:
     type: app-extension
     platform: iOS
     sources:
-    - path: PikminPilotTunnel
+    - path: PikminPilotTunnel/PacketTunnelProvider.swift
+    - path: PikminPilotTunnel/TunnelConstants.swift
     dependencies:
     - sdk: NetworkExtension.framework
     settings:
@@ -79,12 +80,12 @@ targets:
         APPLICATION_EXTENSION_API_ONLY: YES
         CODE_SIGN_STYLE: Manual
         CURRENT_PROJECT_VERSION: '1153'
-        MARKETING_VERSION: '11.5.4.2'
+        MARKETING_VERSION: '11.5.4.3'
   PikminPilotRunnerUITests:
     type: bundle.ui-testing
     platform: iOS
     sources:
-    - path: PikminPilotRunnerUITests
+    - path: PikminPilotRunnerUITests/PikminPilotRunnerUITests.swift
     dependencies:
     - target: PikminPilot
     settings:
@@ -96,4 +97,4 @@ targets:
         GENERATE_INFOPLIST_FILE: true
         CODE_SIGN_STYLE: Automatic
         CURRENT_PROJECT_VERSION: '1153'
-        MARKETING_VERSION: '11.5.4.2'
+        MARKETING_VERSION: '11.5.4.3'

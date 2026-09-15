@@ -119,7 +119,7 @@ struct ContentView: View {
                             let shouldResumeStart = pendingStartAfterPairingImport
                             pendingStartAfterPairingImport = false
                             if shouldResumeStart {
-                                status = "STAGE 11.5.4.2 FIRST SETUP ✅ • Pairing Record saved • continuing START PILOT automatically…"
+                                status = "STAGE 11.5.4.3 FIRST SETUP ✅ • Pairing Record saved • continuing START PILOT automatically…"
                                 Task { await startStage101Auto() }
                             } else {
                                 status = "Pairing Record 已匯入 ✅ • 正在自動 Validate + probe RSD 10.7.0.1:49152…"
@@ -157,7 +157,7 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Pikmin Pilot")
                         .font(.title2.bold())
-                    Text("Stage 11.5.4.2 • 11.5.3 baseline + Cellular Route Probe")
+                    Text("Stage 11.5.4.3 • 11.5.3 baseline + RPPairing Socket Probe")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
@@ -696,14 +696,14 @@ struct ContentView: View {
 
         if pairing.pairingURL == nil {
             if pairing.ensureAvailableFromRecoverySources(), pairing.pairingURL != nil {
-                status = "STAGE 11.5.4.2 ONE-TAP • Pairing recovered automatically ✅ • continuing…"
+                status = "STAGE 11.5.4.3 ONE-TAP • Pairing recovered automatically ✅ • continuing…"
                 await startStage101Auto()
                 return
             }
 
             pendingStartAfterPairingImport = true
             fileImportTarget = .pairing
-            status = "STAGE 11.5.4.2 FIRST SETUP • select the RPPairing Record once; after import START PILOT will continue automatically"
+            status = "STAGE 11.5.4.3 FIRST SETUP • select the RPPairing Record once; after import START PILOT will continue automatically"
             showFileImporter = true
             return
         }
@@ -715,45 +715,45 @@ struct ContentView: View {
     private func startStage101Auto() async {
         guard let url = pairing.pairingURL else { return }
         busy = true
-        status = "STAGE 11.5.4.2 START • \(runSummaryLabel) • integrated tunnel → RSD → DDI preflight → Runner → stable 10.3.1 loop"
+        status = "STAGE 11.5.4.3 START • \(runSummaryLabel) • integrated tunnel → RSD → DDI preflight → Runner → stable 10.3.1 loop"
 
         var tunnelNote = "integrated=not-attempted"
         do {
             try await tunnel.ensureStarted(timeoutSeconds: 10.0)
             tunnelNote = "integrated=connected"
-            status = "STAGE 11.5.4.2 • integrated tunnel ✅ • probing phone-local RSD…"
+            status = "STAGE 11.5.4.3 • integrated tunnel ✅ • probing phone-local RSD…"
         } catch {
             let diag = tunnel.diagnostics(for: error)
             tunnelNote = "integrated=unavailable"
-            status = "STAGE 11.5.4.2 • integrated tunnel unavailable (\(diag)) • trying existing external LocalDevVPN path…"
+            status = "STAGE 11.5.4.3 • integrated tunnel unavailable (\(diag)) • trying existing external LocalDevVPN path…"
         }
 
         let engine = IDeviceEngine(pairingPath: url.path)
         let rsd = await engine.probeRSD()
         rsdReady = rsd.ok
         guard rsd.ok else {
-            // Stage 11.5.4.2: if the normal RPPairing tunnel dies with the
-            // cellular-only device-socket error, probe the fixed Lockdown port
-            // through the same reflector. This cleanly tells us whether the
-            // remaining blocker is RPPairing createListener (Wi-Fi-bound) or
-            // the integrated packet reflector itself.
+            // Stage 11.5.4.3: distinguish the fixed 49152 RPPairing ingress
+            // from the later createListener/device-socket connection hidden in
+            // idevice. Also keep the 62078 result for comparison; neither probe
+            // changes PacketTunnel routes or pairing data.
             if rsd.message.localizedCaseInsensitiveContains("device socket io failed") {
+                let ingress = await engine.probeCellularRPPairingIngress()
                 let lockdown = await engine.probeCellularLockdownRoute()
                 let kinds = pairing.recordKindSummary()
                 busy = false
-                status = "STAGE 11.5.4.2 CELLULAR ROUTE PROBE • normal RPPairing RSD ❌ • \(lockdown.message) • \(kinds) • original=\(rsd.message)"
+                status = "STAGE 11.5.4.3 RP SOCKET PROBE • normal RPPairing RSD ❌ • \(ingress.message) • \(lockdown.message) • \(kinds) • original=\(rsd.message)"
                 return
             }
             busy = false
-            status = "STAGE 11.5.4.2 WAITING FOR TUNNEL • \(tunnelNote) • RSD offline • \(rsd.message)"
+            status = "STAGE 11.5.4.3 WAITING FOR TUNNEL • \(tunnelNote) • RSD offline • \(rsd.message)"
             return
         }
         _ = pairing.backupCurrentRecordToKeychain()
 
-        status = "STAGE 11.5.4.2 PREFLIGHT • RSD ✅ • checking developer services…"
+        status = "STAGE 11.5.4.3 PREFLIGHT • RSD ✅ • checking developer services…"
         var services = await engine.probeXCTestServices()
         if !services.ok {
-            status = "STAGE 11.5.4.2 PREFLIGHT • developer services missing after reboot • preparing Personalized DDI 27A5228h…"
+            status = "STAGE 11.5.4.3 PREFLIGHT • developer services missing after reboot • preparing Personalized DDI 27A5228h…"
 
             let assets: DeveloperDiskImageStore.Assets
             do {
@@ -762,11 +762,11 @@ struct ContentView: View {
                 }
             } catch {
                 busy = false
-                status = "STAGE 11.5.4.2 FAILED • phase=ddi-assets • \(error.localizedDescription)"
+                status = "STAGE 11.5.4.3 FAILED • phase=ddi-assets • \(error.localizedDescription)"
                 return
             }
 
-            status = "STAGE 11.5.4.2 DDI • source=\(assets.sourceLabel) • build=\(assets.buildID) • mounting through phone-local RSD…"
+            status = "STAGE 11.5.4.3 DDI • source=\(assets.sourceLabel) • build=\(assets.buildID) • mounting through phone-local RSD…"
             let mount = await engine.mountPersonalizedDDI(
                 imagePath: assets.imageURL.path,
                 buildManifestPath: assets.buildManifestURL.path,
@@ -774,32 +774,32 @@ struct ContentView: View {
             )
             guard mount.ok else {
                 busy = false
-                status = "STAGE 11.5.4.2 FAILED • phase=ddi-mount • \(mount.message)"
+                status = "STAGE 11.5.4.3 FAILED • phase=ddi-mount • \(mount.message)"
                 return
             }
 
-            status = "STAGE 11.5.4.2 DDI ✅ • \(mount.message) • rebuilding RSD…"
+            status = "STAGE 11.5.4.3 DDI ✅ • \(mount.message) • rebuilding RSD…"
             let postMountRSD = await engine.probeRSD()
             guard postMountRSD.ok else {
                 busy = false
-                status = "STAGE 11.5.4.2 FAILED • phase=post-ddi-rsd • \(postMountRSD.message)"
+                status = "STAGE 11.5.4.3 FAILED • phase=post-ddi-rsd • \(postMountRSD.message)"
                 return
             }
 
             services = await engine.probeXCTestServices()
             guard services.ok else {
                 busy = false
-                status = "STAGE 11.5.4.2 FAILED • phase=post-ddi-service-probe • DDI mount returned success but developer services are still absent • \(services.message)"
+                status = "STAGE 11.5.4.3 FAILED • phase=post-ddi-service-probe • DDI mount returned success but developer services are still absent • \(services.message)"
                 return
             }
         }
 
-        status = "STAGE 11.5.4.2 PREFLIGHT ✅ • RSD + DDI developer services ready • \(tunnelNote) • synchronizing XCTest Runner…"
+        status = "STAGE 11.5.4.3 PREFLIGHT ✅ • RSD + DDI developer services ready • \(tunnelNote) • synchronizing XCTest Runner…"
         var runner = await engine.discoverXCTestRunner()
 
         if runnerPackage.source == .embedded && runnerPackage.isEmbeddedRunnerExpired {
             busy = false
-            status = "STAGE 11.5.4.2 RUNNER EXPIRED • embedded provisioning expired • \(runnerPackage.provisioningStatus)"
+            status = "STAGE 11.5.4.3 RUNNER EXPIRED • embedded provisioning expired • \(runnerPackage.provisioningStatus)"
             return
         }
 
@@ -813,26 +813,26 @@ struct ContentView: View {
         if needsRunnerSync {
             guard let package = runnerPackage.runnerURL else {
                 busy = false
-                status = "STAGE 11.5.4.2 PACKAGING ERROR • embedded signed Runner missing"
+                status = "STAGE 11.5.4.3 PACKAGING ERROR • embedded signed Runner missing"
                 return
             }
-            status = "STAGE 11.5.4.2 RUNNER SYNC • hostBuild=\(hostBuild) • source=\(runnerPackage.sourceLabel) • installing/upgrading…"
+            status = "STAGE 11.5.4.3 RUNNER SYNC • hostBuild=\(hostBuild) • source=\(runnerPackage.sourceLabel) • installing/upgrading…"
             let install = await engine.installXCTestRunnerIPA(localPath: package.path)
             guard install.ok else {
                 busy = false
-                status = "STAGE 11.5.4.2 FAILED • phase=runner-sync • \(install.message)"
+                status = "STAGE 11.5.4.3 FAILED • phase=runner-sync • \(install.message)"
                 return
             }
             runner = await engine.discoverXCTestRunner()
             guard runner.ok else {
                 busy = false
-                status = "STAGE 11.5.4.2 FAILED • phase=runner-sync-verify • \(runner.message)"
+                status = "STAGE 11.5.4.3 FAILED • phase=runner-sync-verify • \(runner.message)"
                 return
             }
             UserDefaults.standard.set(hostBuild, forKey: runnerSyncKey)
-            status = "STAGE 11.5.4.2 RUNNER SYNC ✅ • hostBuild=\(hostBuild) • verified current embedded Runner"
+            status = "STAGE 11.5.4.3 RUNNER SYNC ✅ • hostBuild=\(hostBuild) • verified current embedded Runner"
         } else {
-            status = "STAGE 11.5.4.2 RUNNER ✅ • hostBuild=\(hostBuild) • current Runner already synchronized"
+            status = "STAGE 11.5.4.3 RUNNER ✅ • hostBuild=\(hostBuild) • current Runner already synchronized"
         }
 
         busy = false
@@ -857,13 +857,13 @@ struct ContentView: View {
     private func startIntegratedTunnelOnly() async {
         busy = true
         defer { busy = false }
-        status = "STAGE 11.5.4.2 TUNNEL • creating/loading paid PacketTunnelProvider configuration…"
+        status = "STAGE 11.5.4.3 TUNNEL • creating/loading paid PacketTunnelProvider configuration…"
         do {
             try await tunnel.ensureStarted(timeoutSeconds: 12.0)
-            status = "STAGE 11.5.4.2 TUNNEL CONNECTED ✅ • peer=10.7.0.1/32 • next=RSD 10.7.0.1:49152"
+            status = "STAGE 11.5.4.3 TUNNEL CONNECTED ✅ • peer=10.7.0.1/32 • next=RSD 10.7.0.1:49152"
         } catch {
             let diag = tunnel.diagnostics(for: error)
-            status = "STAGE 11.5.4.2 TUNNEL FAILED • \(diag) • paid-signed tunnel failed; COPY LOG and keep external LocalDevVPN only as a temporary fallback"
+            status = "STAGE 11.5.4.3 TUNNEL FAILED • \(diag) • paid-signed tunnel failed; COPY LOG and keep external LocalDevVPN only as a temporary fallback"
         }
     }
 
