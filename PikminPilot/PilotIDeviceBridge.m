@@ -12,6 +12,7 @@
 #import <errno.h>
 #import <fcntl.h>
 #import <sys/select.h>
+#import <stdio.h>
 
 
 
@@ -775,6 +776,119 @@ int32_t PPProbeRSD(
 
     PPWriteMessage(message, messageCapacity, uuidText);
     return 0;
+}
+
+
+// Stage 11.5.4.5: determine whether Apple's fixed RPPairing ingress (49152)
+// is exposed on any real local interface while Wi-Fi is off. 11.5.4.4 proved:
+//   10.7.0.1:49152 -> ECONNREFUSED
+//   127.0.0.1:49152 -> TCP accepts but full RPPairing is reset by peer
+// Do not touch PacketTunnel routes here. Enumerate the kernel's actual IPv4
+// interface addresses, TCP-probe 49152, then run the exact same PPProbeRSD on
+// every accepting non-loopback candidate. This separates "Wi-Fi-only listener"
+// from "listener moved to cellular/utun" on the user's actual phone.
+int32_t PPProbeCellularRPPairingInterfaces(
+    const char *pairingPath,
+    char *selectedHost,
+    size_t selectedHostCapacity,
+    char *message,
+    size_t messageCapacity
+) {
+    if (selectedHost != NULL && selectedHostCapacity > 0) {
+        selectedHost[0] = '\0';
+    }
+    if (pairingPath == NULL) {
+        PPWriteMessage(message, messageCapacity, @"CELLULAR IF RP PROBE FAILED • missing pairing path");
+        return -30;
+    }
+
+    struct ifaddrs *interfaces = NULL;
+    if (getifaddrs(&interfaces) != 0 || interfaces == NULL) {
+        int e = errno;
+        PPWriteMessage(message, messageCapacity,
+            [NSString stringWithFormat:@"CELLULAR IF RP PROBE FAILED • getifaddrs errno=%d %@", e, PPErrnoText(e)]);
+        return -31;
+    }
+
+    NSMutableArray<NSDictionary<NSString *, NSString *> *> *candidates = [NSMutableArray array];
+    NSMutableSet<NSString *> *seen = [NSMutableSet set];
+    for (struct ifaddrs *cursor = interfaces; cursor != NULL; cursor = cursor->ifa_next) {
+        if (cursor->ifa_addr == NULL || cursor->ifa_addr->sa_family != AF_INET) {
+            continue;
+        }
+        NSString *name = cursor->ifa_name != NULL
+            ? [NSString stringWithUTF8String:cursor->ifa_name]
+            : @"?";
+        if (![name isEqualToString:@"en0"] &&
+            ![name hasPrefix:@"pdp_ip"] &&
+            ![name hasPrefix:@"utun"]) {
+            continue;
+        }
+
+        char host[INET_ADDRSTRLEN] = {0};
+        const struct sockaddr_in *sin = (const struct sockaddr_in *)cursor->ifa_addr;
+        if (inet_ntop(AF_INET, &sin->sin_addr, host, sizeof(host)) == NULL) {
+            continue;
+        }
+        NSString *hostText = [NSString stringWithUTF8String:host];
+        if (hostText.length == 0 || [seen containsObject:hostText]) {
+            continue;
+        }
+        [seen addObject:hostText];
+        [candidates addObject:@{ @"name": name, @"host": hostText }];
+    }
+    freeifaddrs(interfaces);
+
+    [candidates sortUsingComparator:^NSComparisonResult(NSDictionary<NSString *, NSString *> *a,
+                                                        NSDictionary<NSString *, NSString *> *b) {
+        NSString *an = a[@"name"] ?: @"";
+        NSString *bn = b[@"name"] ?: @"";
+        NSComparisonResult r = [an compare:bn];
+        if (r != NSOrderedSame) return r;
+        return [(a[@"host"] ?: @"") compare:(b[@"host"] ?: @"")];
+    }];
+
+    NSMutableArray<NSString *> *reports = [NSMutableArray array];
+    for (NSDictionary<NSString *, NSString *> *candidate in candidates) {
+        NSString *name = candidate[@"name"] ?: @"?";
+        NSString *host = candidate[@"host"] ?: @"?";
+        BOOL connected = NO;
+        NSString *tcp = PPProbeTCPIngress(host, 49152, &connected);
+        if (!connected) {
+            [reports addObject:[NSString stringWithFormat:@"%@=%@ {%@}", name, host, tcp]];
+            continue;
+        }
+
+        char rsdMessage[2048] = {0};
+        int32_t rsdResult = PPProbeRSD(
+            pairingPath,
+            host.UTF8String,
+            49152,
+            rsdMessage,
+            sizeof(rsdMessage)
+        );
+        NSString *rsd = rsdMessage[0] != '\0'
+            ? [NSString stringWithUTF8String:rsdMessage]
+            : [NSString stringWithFormat:@"code=%d", rsdResult];
+        [reports addObject:[NSString stringWithFormat:@"%@=%@ {%@; FULL-RP=%@}", name, host, tcp, rsd]];
+
+        if (rsdResult == 0) {
+            if (selectedHost != NULL && selectedHostCapacity > 0) {
+                snprintf(selectedHost, selectedHostCapacity, "%s", host.UTF8String);
+            }
+            PPWriteMessage(message, messageCapacity,
+                [NSString stringWithFormat:@"CELLULAR IF RP READY ✅ • selected=%@:49152 if=%@ • %@",
+                 host, name, [reports componentsJoinedByString:@" | "]]);
+            return 0;
+        }
+    }
+
+    NSString *candidateText = reports.count > 0
+        ? [reports componentsJoinedByString:@" | "]
+        : @"no en0/pdp_ip*/utun* IPv4 candidates";
+    PPWriteMessage(message, messageCapacity,
+        [NSString stringWithFormat:@"CELLULAR IF RP FAILED ❌ • %@", candidateText]);
+    return 1;
 }
 
 int32_t PPMountPhoneLocalPersonalizedDDI(

@@ -41,6 +41,18 @@ int32_t PPProbeCellularRPPairingIngress(
     size_t messageCapacity
 );
 
+/// Stage 11.5.4.5 cellular interface discriminator. Enumerates local IPv4
+/// addresses on en0/pdp_ip*/utun*, probes TCP 49152, and for every accepting
+/// non-loopback address exercises the full RPPairing -> RSD path with the same
+/// pairing file. selectedHost receives the first address that completes RSD.
+int32_t PPProbeCellularRPPairingInterfaces(
+    const char *pairingPath,
+    char *selectedHost,
+    size_t selectedHostCapacity,
+    char *message,
+    size_t messageCapacity
+);
+
 /// Creates an on-device RPPairing tunnel to host:port and performs an RSD
 /// handshake. Returns 0 on success.
 int32_t PPProbeRSD(

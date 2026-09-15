@@ -44,6 +44,39 @@ actor IDeviceEngine {
         }
     }
 
+    /// Stage 11.5.4.5: enumerate en0/pdp_ip*/utun* IPv4 addresses, TCP-probe
+    /// 49152, then run full RPPairing -> RSD on every accepting candidate.
+    /// Returns the first host that completes RSD so the caller can propagate it
+    /// through DDI/Runner/XCTest instead of falling back to a different path.
+    func probeCellularRPPairingInterfaces() -> (result: Result, selectedHost: String?) {
+        let messageCapacity = 8192
+        let hostCapacity = 128
+        let message = UnsafeMutablePointer<CChar>.allocate(capacity: messageCapacity)
+        let hostBuffer = UnsafeMutablePointer<CChar>.allocate(capacity: hostCapacity)
+        message.initialize(repeating: 0, count: messageCapacity)
+        hostBuffer.initialize(repeating: 0, count: hostCapacity)
+        defer {
+            message.deallocate()
+            hostBuffer.deallocate()
+        }
+
+        let code: Int32 = pairingPath.withCString { path in
+            PPProbeCellularRPPairingInterfaces(
+                path,
+                hostBuffer,
+                hostCapacity,
+                message,
+                messageCapacity
+            )
+        }
+        let text = String(cString: message)
+        let selected = hostBuffer[0] == 0 ? nil : String(cString: hostBuffer)
+        return (
+            Result(ok: code == 0, message: text.isEmpty ? "code=\(code)" : text),
+            selected
+        )
+    }
+
     func probeRSD() -> Result {
         callBridge { path, message, capacity in
             host.withCString { hostCString in
