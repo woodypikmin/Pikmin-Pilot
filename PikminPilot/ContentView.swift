@@ -1,6 +1,7 @@
 import SwiftUI
 import UniformTypeIdentifiers
 import UIKit
+import Darwin
 
 struct ContentView: View {
     @StateObject private var pairing = PairingRecordStore()
@@ -32,6 +33,7 @@ struct ContentView: View {
     @State private var cellularBootstrapArmed = false
     @State private var cellularSessionReadyForRestore = false
     @State private var cellularPersistentEngine: IDeviceEngine?
+    @State private var cellularAutoResumeTask: Task<Void, Never>?
 
     private var selectedTargetDispatches: Int? {
         switch runMode {
@@ -122,7 +124,7 @@ struct ContentView: View {
                             let shouldResumeStart = pendingStartAfterPairingImport
                             pendingStartAfterPairingImport = false
                             if shouldResumeStart {
-                                status = "STAGE 11.5.4.9 FIRST SETUP ✅ • Pairing Record saved • continuing START PILOT automatically…"
+                                status = "STAGE 11.5.4.10 FIRST SETUP ✅ • Pairing Record saved • continuing START PILOT automatically…"
                                 Task { await startStage101Auto() }
                             } else {
                                 status = "Pairing Record 已匯入 ✅ • 正在自動 Validate + probe RSD 10.7.0.1:49152…"
@@ -160,7 +162,7 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Pikmin Pilot")
                         .font(.title2.bold())
-                    Text("Stage 11.5.4.9 • 11.5.3 baseline + Persistent RSD Cellular Escape")
+                    Text("Stage 11.5.4.10 • 11.5.3 baseline + Warm Cellular Session + Loop Stability")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
@@ -397,7 +399,7 @@ struct ContentView: View {
     private var liveStatusCard: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Label("目前狀態", systemImage: loop.isRunning ? "waveform.path.ecg" : "checkmark.circle")
+                Label("目前狀態", systemImage: loop.isRunning ? "waveform.path.ecg" : (loop.currentPhase == "已完成" ? "checkmark.circle" : "pause.circle"))
                     .font(.headline)
                 Spacer()
                 if loop.isRunning {
@@ -699,14 +701,14 @@ struct ContentView: View {
 
         if pairing.pairingURL == nil {
             if pairing.ensureAvailableFromRecoverySources(), pairing.pairingURL != nil {
-                status = "STAGE 11.5.4.9 ONE-TAP • Pairing recovered automatically ✅ • continuing…"
+                status = "STAGE 11.5.4.10 ONE-TAP • Pairing recovered automatically ✅ • continuing…"
                 await startStage101Auto()
                 return
             }
 
             pendingStartAfterPairingImport = true
             fileImportTarget = .pairing
-            status = "STAGE 11.5.4.9 FIRST SETUP • select the RPPairing Record once; after import START PILOT will continue automatically"
+            status = "STAGE 11.5.4.10 FIRST SETUP • select the RPPairing Record once; after import START PILOT will continue automatically"
             showFileImporter = true
             return
         }
@@ -718,12 +720,12 @@ struct ContentView: View {
     private func startStage101Auto() async {
         guard let url = pairing.pairingURL else { return }
 
-        // Stage 11.5.4.9 step 3: an RSD session was established while Airplane
+        // Stage 11.5.4.10 step 3: an RSD session was established while Airplane
         // Mode was temporarily active. After the user restores cellular, verify
         // the existing session itself — do NOT reconnect to RemotePairing :49152.
         if cellularSessionReadyForRestore, let persistentEngine = cellularPersistentEngine {
             busy = true
-            status = "STAGE 11.5.4.9 CELLULAR ESCAPE STEP 3 • verifying the already-open RSD session after 4G/5G restore • no :49152 reconnect…"
+            status = "STAGE 11.5.4.10 CELLULAR ESCAPE STEP 3 • verifying the already-open RSD session after 4G/5G restore • no :49152 reconnect…"
             let health = await persistentEngine.probePersistentSessionHealth()
             guard health.ok else {
                 await persistentEngine.closePersistentSession()
@@ -731,40 +733,56 @@ struct ContentView: View {
                 cellularSessionReadyForRestore = false
                 cellularBootstrapArmed = true
                 busy = false
-                status = "STAGE 11.5.4.9 PERSISTENT SESSION DID NOT SURVIVE CELLULAR RESTORE ❌ • \(health.message) • keep Integrated Tunnel on, enable Airplane Mode again, return and press START PILOT"
+                status = "STAGE 11.5.4.10 PERSISTENT SESSION DID NOT SURVIVE CELLULAR RESTORE ❌ • \(health.message) • keep Integrated Tunnel on, enable Airplane Mode again, return and press START PILOT"
                 return
             }
 
             cellularSessionReadyForRestore = false
             busy = false
             rsdReady = true
-            status = "STAGE 11.5.4.9 CELLULAR ESCAPE READY ✅ • persistent RSD survived 4G/5G restore • starting 10.3.1 automation with RPPairing reconnect DISABLED"
-            loop.startPersistent(
+            startPersistentAutomation(
                 engine: persistentEngine,
-                transportLabel: "persistent-RSD@10.7.0.1 bootstrap",
-                targetDispatches: selectedTargetDispatches,
-                pikminType: selectedPikminType,
-                pikminCount: max(selectedPikminType.minimumCount, pikminCount),
-                cargoMode: selectedCargoMode,
-                fastMode: isFastMode,
-                onStatus: { newStatus in status = newStatus },
-                onScreenshot: { image in screenshotImage = image }
+                label: "persistent-RSD@10.7.0.1 restored-cellular",
+                banner: "STAGE 11.5.4.10 CELLULAR ESCAPE READY ✅ • persistent RSD survived 4G/5G restore • starting without :49152 reconnect"
             )
             return
         }
 
+        // Stage 11.5.4.10 WARM SESSION: once cellular bootstrap has succeeded,
+        // keep reusing that live RSD handle for later STARTs. As long as iOS has
+        // not killed the app/session, subsequent 4G/5G runs need no Airplane step.
+        if cellularInterfaceAvailable(), let persistentEngine = cellularPersistentEngine {
+            busy = true
+            status = "STAGE 11.5.4.10 WARM CELLULAR SESSION • checking existing persistent RSD before raw RPPairing…"
+            let health = await persistentEngine.probePersistentSessionHealth()
+            if health.ok {
+                busy = false
+                rsdReady = true
+                startPersistentAutomation(
+                    engine: persistentEngine,
+                    label: "persistent-RSD@10.7.0.1 warm-reuse",
+                    banner: "STAGE 11.5.4.10 WARM CELLULAR DIRECT ✅ • existing RSD session alive • Airplane bootstrap skipped for this run"
+                )
+                return
+            }
+            await persistentEngine.closePersistentSession()
+            cellularPersistentEngine = nil
+            busy = false
+            status = "STAGE 11.5.4.10 WARM SESSION EXPIRED • live RSD no longer usable • falling back to normal bootstrap detection"
+        }
+
         busy = true
-        status = "STAGE 11.5.4.9 START • \(runSummaryLabel) • 11.5.3 baseline transport"
+        status = "STAGE 11.5.4.10 START • \(runSummaryLabel) • 11.5.3 baseline transport"
 
         var tunnelNote = "integrated=not-attempted"
         do {
             try await tunnel.ensureStarted(timeoutSeconds: 10.0)
             tunnelNote = "integrated=connected"
-            status = "STAGE 11.5.4.9 • integrated tunnel ✅ • probing phone-local RSD…"
+            status = "STAGE 11.5.4.10 • integrated tunnel ✅ • probing phone-local RSD…"
         } catch {
             let diag = tunnel.diagnostics(for: error)
             tunnelNote = "integrated=unavailable"
-            status = "STAGE 11.5.4.9 • integrated tunnel unavailable (\(diag)) • probing existing path…"
+            status = "STAGE 11.5.4.10 • integrated tunnel unavailable (\(diag)) • probing existing path…"
         }
 
         let activeHost = "10.7.0.1"
@@ -780,28 +798,28 @@ struct ContentView: View {
             // Airplane Mode is active and, if it works, keeps that RSD session alive.
             cellularBootstrapArmed = true
             busy = false
-            status = "STAGE 11.5.4.9 CELLULAR ESCAPE STEP 1 • \(tunnelNote) • raw RPPairing unavailable with cellular active • \(rsd.message) • KEEP Pikmin Pilot Integrated Tunnel ON → turn Airplane Mode ON → return to Pikmin Pilot → press START PILOT again"
+            status = "STAGE 11.5.4.10 CELLULAR ESCAPE STEP 1 • \(tunnelNote) • raw RPPairing unavailable with cellular active • \(rsd.message) • KEEP Pikmin Pilot Integrated Tunnel ON → turn Airplane Mode ON → return to Pikmin Pilot → press START PILOT again"
             return
         }
         _ = pairing.backupCurrentRecordToKeychain()
 
         var usingPersistentCellularSession = false
         if cellularBootstrapArmed {
-            status = "STAGE 11.5.4.9 CELLULAR ESCAPE STEP 2 • RPPairing reachable with temporary Airplane Mode ✅ • pinning one persistent RSD session…"
+            status = "STAGE 11.5.4.10 CELLULAR ESCAPE STEP 2 • RPPairing reachable with temporary Airplane Mode ✅ • pinning one persistent RSD session…"
             let persistent = await engine.openPersistentSession()
             guard persistent.ok else {
                 busy = false
-                status = "STAGE 11.5.4.9 CELLULAR ESCAPE FAILED ❌ • phase=persistent-session-create • \(persistent.message)"
+                status = "STAGE 11.5.4.10 CELLULAR ESCAPE FAILED ❌ • phase=persistent-session-create • \(persistent.message)"
                 return
             }
             usingPersistentCellularSession = true
-            status = "STAGE 11.5.4.9 PERSISTENT RSD PINNED ✅ • \(persistent.message) • preflighting DDI/Runner before cellular restore…"
+            status = "STAGE 11.5.4.10 PERSISTENT RSD PINNED ✅ • \(persistent.message) • preflighting DDI/Runner before cellular restore…"
         }
 
-        status = "STAGE 11.5.4.9 PREFLIGHT • RSD ✅ • checking developer services…"
+        status = "STAGE 11.5.4.10 PREFLIGHT • RSD ✅ • checking developer services…"
         var services = await engine.probeXCTestServices()
         if !services.ok {
-            status = "STAGE 11.5.4.9 PREFLIGHT • developer services missing • preparing Personalized DDI 27A5228h…"
+            status = "STAGE 11.5.4.10 PREFLIGHT • developer services missing • preparing Personalized DDI 27A5228h…"
 
             let assets: DeveloperDiskImageStore.Assets
             do {
@@ -811,11 +829,11 @@ struct ContentView: View {
             } catch {
                 if usingPersistentCellularSession { await engine.closePersistentSession() }
                 busy = false
-                status = "STAGE 11.5.4.9 FAILED • phase=ddi-assets • if Airplane Mode is on, run once on Wi-Fi beforehand so DDI assets are cached • \(error.localizedDescription)"
+                status = "STAGE 11.5.4.10 FAILED • phase=ddi-assets • if Airplane Mode is on, run once on Wi-Fi beforehand so DDI assets are cached • \(error.localizedDescription)"
                 return
             }
 
-            status = "STAGE 11.5.4.9 DDI • source=\(assets.sourceLabel) • build=\(assets.buildID) • mounting…"
+            status = "STAGE 11.5.4.10 DDI • source=\(assets.sourceLabel) • build=\(assets.buildID) • mounting…"
             let mount = await engine.mountPersonalizedDDI(
                 imagePath: assets.imageURL.path,
                 buildManifestPath: assets.buildManifestURL.path,
@@ -824,7 +842,7 @@ struct ContentView: View {
             guard mount.ok else {
                 if usingPersistentCellularSession { await engine.closePersistentSession() }
                 busy = false
-                status = "STAGE 11.5.4.9 FAILED • phase=ddi-mount • \(mount.message)"
+                status = "STAGE 11.5.4.10 FAILED • phase=ddi-mount • \(mount.message)"
                 return
             }
 
@@ -835,14 +853,14 @@ struct ContentView: View {
                 let reopened = await engine.openPersistentSession()
                 guard reopened.ok else {
                     busy = false
-                    status = "STAGE 11.5.4.9 FAILED • phase=post-ddi-persistent-reopen • \(reopened.message)"
+                    status = "STAGE 11.5.4.10 FAILED • phase=post-ddi-persistent-reopen • \(reopened.message)"
                     return
                 }
             } else {
                 let postMountRSD = await engine.probeRSD()
                 guard postMountRSD.ok else {
                     busy = false
-                    status = "STAGE 11.5.4.9 FAILED • phase=post-ddi-rsd • \(postMountRSD.message)"
+                    status = "STAGE 11.5.4.10 FAILED • phase=post-ddi-rsd • \(postMountRSD.message)"
                     return
                 }
             }
@@ -851,18 +869,18 @@ struct ContentView: View {
             guard services.ok else {
                 if usingPersistentCellularSession { await engine.closePersistentSession() }
                 busy = false
-                status = "STAGE 11.5.4.9 FAILED • phase=post-ddi-service-probe • \(services.message)"
+                status = "STAGE 11.5.4.10 FAILED • phase=post-ddi-service-probe • \(services.message)"
                 return
             }
         }
 
-        status = "STAGE 11.5.4.9 PREFLIGHT ✅ • RSD + DDI ready • synchronizing XCTest Runner…"
+        status = "STAGE 11.5.4.10 PREFLIGHT ✅ • RSD + DDI ready • synchronizing XCTest Runner…"
         var runner = await engine.discoverXCTestRunner()
 
         if runnerPackage.source == .embedded && runnerPackage.isEmbeddedRunnerExpired {
             if usingPersistentCellularSession { await engine.closePersistentSession() }
             busy = false
-            status = "STAGE 11.5.4.9 RUNNER EXPIRED • embedded provisioning expired • \(runnerPackage.provisioningStatus)"
+            status = "STAGE 11.5.4.10 RUNNER EXPIRED • embedded provisioning expired • \(runnerPackage.provisioningStatus)"
             return
         }
 
@@ -874,22 +892,22 @@ struct ContentView: View {
             guard let package = runnerPackage.runnerURL else {
                 if usingPersistentCellularSession { await engine.closePersistentSession() }
                 busy = false
-                status = "STAGE 11.5.4.9 PACKAGING ERROR • embedded signed Runner missing"
+                status = "STAGE 11.5.4.10 PACKAGING ERROR • embedded signed Runner missing"
                 return
             }
-            status = "STAGE 11.5.4.9 RUNNER SYNC • hostBuild=\(hostBuild) • installing/upgrading…"
+            status = "STAGE 11.5.4.10 RUNNER SYNC • hostBuild=\(hostBuild) • installing/upgrading…"
             let install = await engine.installXCTestRunnerIPA(localPath: package.path)
             guard install.ok else {
                 if usingPersistentCellularSession { await engine.closePersistentSession() }
                 busy = false
-                status = "STAGE 11.5.4.9 FAILED • phase=runner-sync • \(install.message)"
+                status = "STAGE 11.5.4.10 FAILED • phase=runner-sync • \(install.message)"
                 return
             }
             runner = await engine.discoverXCTestRunner()
             guard runner.ok else {
                 if usingPersistentCellularSession { await engine.closePersistentSession() }
                 busy = false
-                status = "STAGE 11.5.4.9 FAILED • phase=runner-sync-verify • \(runner.message)"
+                status = "STAGE 11.5.4.10 FAILED • phase=runner-sync-verify • \(runner.message)"
                 return
             }
             UserDefaults.standard.set(hostBuild, forKey: runnerSyncKey)
@@ -901,7 +919,8 @@ struct ContentView: View {
             cellularSessionReadyForRestore = true
             busy = false
             rsdReady = true
-            status = "STAGE 11.5.4.9 CELLULAR ESCAPE STEP 2 READY ✅ • PERSISTENT RSD + DDI + RUNNER READY • do NOT close Pikmin Pilot / do NOT stop Integrated Tunnel • now turn Airplane Mode OFF so 4G/5G returns → come back → press START PILOT once more"
+            status = "STAGE 11.5.4.10 CELLULAR ESCAPE STEP 2 READY ✅ • PERSISTENT RSD + DDI + RUNNER READY • turn Airplane Mode OFF • AUTO-RESUME is armed; no third START should be needed"
+            armCellularAutoResume()
             return
         }
 
@@ -922,16 +941,110 @@ struct ContentView: View {
 
 
     @MainActor
+    private func startPersistentAutomation(
+        engine: IDeviceEngine,
+        label: String,
+        banner: String
+    ) {
+        cellularAutoResumeTask?.cancel()
+        cellularAutoResumeTask = nil
+        cellularSessionReadyForRestore = false
+        rsdReady = true
+        status = banner
+        loop.startPersistent(
+            engine: engine,
+            transportLabel: label,
+            targetDispatches: selectedTargetDispatches,
+            pikminType: selectedPikminType,
+            pikminCount: max(selectedPikminType.minimumCount, pikminCount),
+            cargoMode: selectedCargoMode,
+            fastMode: isFastMode,
+            onStatus: { newStatus in status = newStatus },
+            onScreenshot: { image in screenshotImage = image }
+        )
+    }
+
+    /// Detect the physical cellular data interface directly. This deliberately
+    /// ignores the existing utun PacketTunnel: the auto-resume trigger is the
+    /// return of pdp_ip* after Airplane Mode is turned OFF.
+    private func cellularInterfaceAvailable() -> Bool {
+        var head: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&head) == 0, let first = head else { return false }
+        defer { freeifaddrs(head) }
+
+        var cursor: UnsafeMutablePointer<ifaddrs>? = first
+        while let node = cursor {
+            let ifa = node.pointee
+            if let namePtr = ifa.ifa_name, let addr = ifa.ifa_addr {
+                let name = String(cString: namePtr)
+                let family = Int32(addr.pointee.sa_family)
+                if name.hasPrefix("pdp_ip") && (family == AF_INET || family == AF_INET6) {
+                    let flags = Int32(ifa.ifa_flags)
+                    if (flags & IFF_UP) != 0 && (flags & IFF_RUNNING) != 0 {
+                        return true
+                    }
+                }
+            }
+            cursor = ifa.ifa_next
+        }
+        return false
+    }
+
+    @MainActor
+    private func armCellularAutoResume() {
+        cellularAutoResumeTask?.cancel()
+        cellularAutoResumeTask = Task { @MainActor in
+            var sawCellularDown = !cellularInterfaceAvailable()
+            for _ in 0..<240 { // up to ~2 minutes; manual START remains a fallback
+                if Task.isCancelled || !cellularSessionReadyForRestore { return }
+
+                let cellularUp = cellularInterfaceAvailable()
+                if !cellularUp { sawCellularDown = true }
+
+                if sawCellularDown && cellularUp,
+                   let engine = cellularPersistentEngine {
+                    status = "STAGE 11.5.4.10 AUTO CELLULAR RESUME • pdp_ip restored ✅ • validating pinned RSD session…"
+                    try? await Task.sleep(nanoseconds: 850_000_000)
+                    let health = await engine.probePersistentSessionHealth()
+                    if health.ok {
+                        busy = false
+                        startPersistentAutomation(
+                            engine: engine,
+                            label: "persistent-RSD@10.7.0.1 auto-cellular-resume",
+                            banner: "STAGE 11.5.4.10 AUTO CELLULAR RESUME READY ✅ • 4G/5G returned • starting Pilot automatically • no third START"
+                        )
+                    } else {
+                        await engine.closePersistentSession()
+                        cellularPersistentEngine = nil
+                        cellularSessionReadyForRestore = false
+                        cellularBootstrapArmed = true
+                        busy = false
+                        status = "STAGE 11.5.4.10 AUTO RESUME FAILED ❌ • pinned RSD did not survive cellular restore • \(health.message) • repeat Airplane bootstrap"
+                    }
+                    return
+                }
+
+                try? await Task.sleep(nanoseconds: 500_000_000)
+            }
+
+            if cellularSessionReadyForRestore {
+                status = "STAGE 11.5.4.10 AUTO RESUME WAITING • cellular interface was not observed in time • session is still pinned; press START PILOT manually after 4G/5G returns"
+            }
+        }
+    }
+
+
+    @MainActor
     private func startIntegratedTunnelOnly() async {
         busy = true
         defer { busy = false }
-        status = "STAGE 11.5.4.9 TUNNEL • creating/loading paid PacketTunnelProvider configuration…"
+        status = "STAGE 11.5.4.10 TUNNEL • creating/loading paid PacketTunnelProvider configuration…"
         do {
             try await tunnel.ensureStarted(timeoutSeconds: 12.0)
-            status = "STAGE 11.5.4.9 TUNNEL CONNECTED ✅ • peer=10.7.0.1 • next=RSD 10.7.0.1:49152"
+            status = "STAGE 11.5.4.10 TUNNEL CONNECTED ✅ • peer=10.7.0.1 • next=RSD 10.7.0.1:49152"
         } catch {
             let diag = tunnel.diagnostics(for: error)
-            status = "STAGE 11.5.4.9 TUNNEL FAILED • \(diag) • paid-signed tunnel failed; COPY LOG and keep external LocalDevVPN only as a temporary fallback"
+            status = "STAGE 11.5.4.10 TUNNEL FAILED • \(diag) • paid-signed tunnel failed; COPY LOG and keep external LocalDevVPN only as a temporary fallback"
         }
     }
 

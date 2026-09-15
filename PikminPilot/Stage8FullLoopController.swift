@@ -30,6 +30,11 @@ final class Stage8FullLoopController: ObservableObject {
     private var backgroundGeneration: UInt64 = 0
     private var renewalInProgress = false
     private var criticalTailInProgress = false
+    // Stage 11.5.4.10: once a dispatch has left the expedition list, Pilot is
+    // forbidden from foregrounding itself until Runner has positively closed
+    // the carrying green X and hands control back. This prevents a background
+    // renewal/checkpoint from stealing foreground before the close tap.
+    private var gameplayForegroundLock = false
     private var backgroundExpiredDuringCriticalTail = false
     private var logLines: [String] = []
 
@@ -52,6 +57,7 @@ final class Stage8FullLoopController: ObservableObject {
         cancelled = false
         stopCause = .none
         stopAfterCurrentRequested = false
+        gameplayForegroundLock = false
         completedDispatches = 0
         self.targetDispatches = targetDispatches.flatMap { $0 > 0 ? $0 : nil }
         self.pikminType = pikminType
@@ -74,7 +80,7 @@ final class Stage8FullLoopController: ObservableObject {
         }
     }
 
-    // Stage 11.5.4.9: run the same verified 10.3.1 automation core on an
+    // Stage 11.5.4.10: run the same verified 10.3.1 automation core on an
     // already-established persistent RSD session. This is the cellular escape
     // path: no operation below is allowed to reconnect to RemotePairing :49152.
     func startPersistent(
@@ -93,6 +99,7 @@ final class Stage8FullLoopController: ObservableObject {
         cancelled = false
         stopCause = .none
         stopAfterCurrentRequested = false
+        gameplayForegroundLock = false
         completedDispatches = 0
         self.targetDispatches = targetDispatches.flatMap { $0 > 0 ? $0 : nil }
         self.pikminType = pikminType
@@ -107,7 +114,7 @@ final class Stage8FullLoopController: ObservableObject {
 
         beginBackgroundWindow(label: "persistent-cellular")
         let goal = self.targetDispatches.map(String.init) ?? "∞"
-        emit("STAGE 11.5.4.9 PERSISTENT CELLULAR RUN START • automation-core=10.3.1 • transport=\(transportLabel) • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • RPPairing-reconnect=DISABLED")
+        emit("STAGE 11.5.4.10 PERSISTENT CELLULAR RUN START • automation-core=10.3.1 • transport=\(transportLabel) • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • RPPairing-reconnect=DISABLED")
 
         worker = Task { [weak self] in
             guard let self else { return }
@@ -144,6 +151,7 @@ final class Stage8FullLoopController: ObservableObject {
         backgroundGeneration &+= 1
         renewalInProgress = false
         criticalTailInProgress = false
+        gameplayForegroundLock = false
         backgroundExpiredDuringCriticalTail = false
         if backgroundTask != .invalid {
             UIApplication.shared.endBackgroundTask(backgroundTask)
@@ -185,14 +193,12 @@ final class Stage8FullLoopController: ObservableObject {
                         UIApplication.shared.endBackgroundTask(expiredTask)
                     }
 
-                    if self.criticalTailInProgress {
-                        // The XCTest Runner is a separate process and can finish
-                        // the GO -> green-X tail even if Pilot's finite window
-                        // expires. The Runner will explicitly activate Pilot at
-                        // the end of the tail, so do not mislabel this as a user
-                        // stop or permanently cancel the loop.
+                    if self.criticalTailInProgress || self.gameplayForegroundLock {
+                        // Never steal foreground from Pikmin while a dispatch is in
+                        // its selection/GO/carrying-close critical region. Runner
+                        // owns that foreground until the green X is positively closed.
                         self.backgroundExpiredDuringCriticalTail = true
-                        self.emit("BACKGROUND WINDOW EXPIRED DURING CRITICAL TAIL • waiting for Runner→Pilot handoff")
+                        self.emit("BACKGROUND WINDOW EXPIRED DURING FOREGROUND-LOCK • deferring recovery until verified Runner→Pilot handoff")
                         return
                     }
 
@@ -243,29 +249,55 @@ final class Stage8FullLoopController: ObservableObject {
             emit("Pikmin activate ✅")
             await pause(fastMode ? 0.28 : 0.45)
 
+            var consecutiveEmptyFullScans = 0
             while !cancelled {
                 if let targetDispatches, completedDispatches >= targetDispatches {
                     stopCause = .targetReached
                     setPhase("已完成")
-                    emit("COMPLETED • requested=\(targetDispatches) • completed=\(completedDispatches)")
+                    emit("COMPLETED • requested=\(targetDispatches) • completed=\(completedDispatches) • exact-target=YES")
                     finish()
                     return
                 }
 
                 let round = completedDispatches + 1
                 setPhase("尋找\(cargoMode.scanDescription)")
-                emit("ROUND \(round) • scanning Expedition list • cargo=\(cargoMode.displayName)")
+                let requested = targetDispatches.map(String.init) ?? "∞"
+                emit("ROUND \(round) • scanning Expedition list • cargo=\(cargoMode.displayName) • progress=\(completedDispatches)/\(requested)")
 
                 guard let choice = try await findAvailableCargo(
                     engine: engine,
                     round: round
                 ) else {
-                    setPhase("沒有可搬運項目")
-                    let requested = targetDispatches.map(String.init) ?? "∞"
-                    emit("FINISHED EARLY • requested=\(requested) • completed=\(completedDispatches) • no safe AVAILABLE \(cargoMode.displayName) found")
-                    finish()
-                    return
+                    consecutiveEmptyFullScans += 1
+
+                    // Stage 11.5.4.10: a transient detector/list refresh miss must
+                    // never be reported as completion. Retry the SAME round.
+                    if targetDispatches != nil && consecutiveEmptyFullScans <= 3 {
+                        setPhase("暫時找不到項目，重試第 \(consecutiveEmptyFullScans) 次")
+                        emit("ROUND \(round) RETRY • requested=\(requested) • completed=\(completedDispatches) • no safe AVAILABLE after full scan • retry=\(consecutiveEmptyFullScans)/3 • COMPLETE=NO")
+                        let reactivate = await engine.runXCTestActivateOnly()
+                        if !reactivate.ok {
+                            throw LoopError("Round \(round): retry reactivate failed • \(reactivate.message)")
+                        }
+                        await pause(fastMode ? 0.55 : 0.90)
+                        continue
+                    }
+
+                    if targetDispatches != nil {
+                        setPhase("未完成：目前找不到可搬運項目")
+                        emit("INCOMPLETE • requested=\(requested) • completed=\(completedDispatches) • reason=no safe AVAILABLE after \(consecutiveEmptyFullScans) full scans • COMPLETE=NO")
+                        finish()
+                        return
+                    }
+
+                    // Infinite mode waits instead of silently terminating.
+                    setPhase("等待新的可搬運項目")
+                    emit("WAITING • mode=infinite • completed=\(completedDispatches) • no safe AVAILABLE • retrying")
+                    consecutiveEmptyFullScans = 0
+                    await pause(fastMode ? 1.0 : 1.8)
+                    continue
                 }
+                consecutiveEmptyFullScans = 0
 
                 try await runOneDispatch(
                     engine: engine,
@@ -295,7 +327,7 @@ final class Stage8FullLoopController: ObservableObject {
                 if let targetDispatches, completedDispatches >= targetDispatches {
                     stopCause = .targetReached
                     setPhase("已完成")
-                    emit("COMPLETED • requested=\(targetDispatches) • completed=\(completedDispatches) • list=ready")
+                    emit("COMPLETED • requested=\(targetDispatches) • completed=\(completedDispatches) • list=ready • exact-target=YES")
                     finish()
                     return
                 }
@@ -417,6 +449,16 @@ final class Stage8FullLoopController: ObservableObject {
     ) async throws {
         try checkCancelled()
 
+        // Renew only while still on the expedition list, before entering any
+        // modal/detail/selection UI. After this point gameplayForegroundLock
+        // prevents Pilot from stealing foreground until the green X is closed.
+        try await ensureBackgroundBudget(
+            engine: engine,
+            stage: "pre-dispatch-safe-boundary",
+            minimumRemaining: 22.0
+        )
+        gameplayForegroundLock = true
+
         setPhase(item.kind == .seedling ? "點擊可用花苗" : "點擊可用水果")
         emit("ROUND \(round) • tap AVAILABLE • kind=\(item.kind.rawValue) • label=\(item.labelText)")
         try await tap(
@@ -447,17 +489,12 @@ final class Stage8FullLoopController: ObservableObject {
         )
         await pause(fastMode ? 1.45 : 2.0)
 
-        // Stage 8.2.2: refresh the finite background window BEFORE detecting
-        // the selected Pikmin filter. In 8.2.1 we detected pink first, then foregrounded Pilot. When
-        // Pikmin was activated again the selection screen could re-render, so
-        // the saved filter coordinate became stale and Runner tapped whatever was
-        // now under that old point. Do the foreground checkpoint first, return
-        // to Pikmin, and only then obtain a fresh DVT frame + fresh filter point.
-        setPhase("準備選擇\(pikminType.displayName)皮克敏")
-        try await prepareCriticalTailWindow(engine: engine, round: round)
-
+        // Stage 11.5.4.10 FOREGROUND LOCK: do NOT foreground Pikmin Pilot here.
+        // 11.5.4.9 could renew/checkpoint Pilot between the expedition detail and
+        // the carrying-close tail, which occasionally stole foreground before X.
+        // The background budget was renewed at the safe list boundary above.
         setPhase("辨識\(pikminType.displayName)皮克敏")
-        emit("ROUND \(round) • returned to selection page • detect \(pikminType.shortName) filter on fresh post-checkpoint frame")
+        emit("ROUND \(round) • selection page stable • detect \(pikminType.shortName) filter on fresh foreground-locked frame")
         await pause(fastMode ? 0.18 : 0.28)
 
         emit("ROUND \(round) • reveal Pikmin filter row • target=\(pikminType.shortName)")
@@ -504,7 +541,7 @@ final class Stage8FullLoopController: ObservableObject {
         }
 
         guard let selectedFilter = filterFound else {
-            throw LoopError("Round \(round): \(pikminType.shortName) filter not detected on fresh post-checkpoint frame")
+            throw LoopError("Round \(round): \(pikminType.shortName) filter not detected on fresh foreground-locked frame")
         }
 
         // Pass the coordinate from the *fresh* post-checkpoint screenshot into
@@ -555,44 +592,6 @@ final class Stage8FullLoopController: ObservableObject {
     }
 
 
-    private func prepareCriticalTailWindow(
-        engine: IDeviceEngine,
-        round: Int
-    ) async throws {
-        guard let bundleID = Bundle.main.bundleIdentifier, !bundleID.isEmpty else {
-            throw LoopError("Pilot bundle identifier unavailable for critical-tail checkpoint")
-        }
-
-        emit("ROUND \(round) • foreground checkpoint before critical tail")
-        let foregroundPilot = await engine.launchBundleID(bundleID)
-        guard foregroundPilot.ok else {
-            throw LoopError("phase=critical-tail-foreground-pilot • \(foregroundPilot.message)")
-        }
-
-        var active = false
-        for _ in 0..<50 {
-            if UIApplication.shared.applicationState == .active {
-                active = true
-                break
-            }
-            await pause(0.04)
-        }
-        guard active else {
-            throw LoopError("phase=critical-tail-foreground-pilot • Pilot did not become active")
-        }
-
-        beginBackgroundWindow(label: "critical-tail-r\(round)")
-
-        // Return to the already-running game now, before any Pikmin-filter detection.
-        // This guarantees the DVT screenshot used for the filter coordinate is
-        // from the exact screen state Runner will act on.
-        let reactivate = await engine.runXCTestActivateOnly()
-        guard reactivate.ok else {
-            throw LoopError("phase=critical-tail-reactivate-pikmin • \(reactivate.message)")
-        }
-        emit("ROUND \(round) • fresh background task armed • Pikmin re-activated before Pikmin-filter detection ✅")
-    }
-
     private func completeRunnerHandoff(
         engine: IDeviceEngine,
         round: Int
@@ -611,6 +610,10 @@ final class Stage8FullLoopController: ObservableObject {
         guard active else {
             throw LoopError("phase=runner-handoff • verified Runner did not return Pilot foreground; leaving Pikmin Bloom visible for diagnosis")
         }
+
+        // Runner only activates Pilot after its own verified green-X close. From
+        // this point foreground renewal is safe again.
+        gameplayForegroundLock = false
 
         if backgroundExpiredDuringCriticalTail {
             emit("ROUND \(round) • Runner handoff recovered an expired background window ✅")
@@ -829,6 +832,13 @@ final class Stage8FullLoopController: ObservableObject {
         guard UIApplication.shared.applicationState != .active else { return }
 
         let remaining = UIApplication.shared.backgroundTimeRemaining
+        if gameplayForegroundLock {
+            if remaining.isFinite && remaining < minimumRemaining {
+                emit(String(format: "FOREGROUND LOCK • %.1fs left at %@ • Pilot renewal suppressed until green-X close", remaining, stage))
+            }
+            return
+        }
+
         if remaining.isFinite && remaining < minimumRemaining {
             emit(String(format: "BACKGROUND %.1fs left • renewing at %@", remaining, stage))
             try await refreshBackgroundWindow(engine: engine, reason: stage)
