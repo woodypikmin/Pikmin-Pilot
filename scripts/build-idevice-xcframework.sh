@@ -401,7 +401,6 @@ cp "$ROOT/RustPatch/pilot_xctest_metadata.rs" ffi/src/pilot_xctest_metadata.rs
 cp "$ROOT/RustPatch/pilot_xctest_execute.rs" ffi/src/pilot_xctest_execute.rs
 cp "$ROOT/RustPatch/pilot_runner_install.rs" ffi/src/pilot_runner_install.rs
 cp "$ROOT/RustPatch/pilot_ddi_mount.rs" ffi/src/pilot_ddi_mount.rs
-cp "$ROOT/RustPatch/pilot_cellular_coredevice.rs" ffi/src/pilot_cellular_coredevice.rs
 
 # Add a focused FFI-only feature under the existing [features] table.
 python3 - <<'PY'
@@ -429,40 +428,7 @@ mod pilot_xctest_metadata;
 mod pilot_xctest_execute;
 mod pilot_runner_install;
 mod pilot_ddi_mount;
-mod pilot_cellular_coredevice;
 
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn pilot_classic_bootstrap_rsd(
-    adapter: *mut core_device_proxy::AdapterHandle,
-    handshake: *mut rsd::RsdHandshakeHandle,
-    output_path: *const std::ffi::c_char,
-    host_id: *const std::ffi::c_char,
-    system_buid: *const std::ffi::c_char,
-    message: *mut std::ffi::c_char,
-    message_capacity: usize,
-) -> i32 {
-    unsafe {
-        pilot_cellular_coredevice::pilot_classic_bootstrap_rsd_impl(
-            adapter, handshake, output_path, host_id, system_buid, message, message_capacity,
-        )
-    }
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn pilot_classic_coredevice_tunnel(
-    classic_pairing_path: *const std::ffi::c_char,
-    host: *const std::ffi::c_char,
-    out_adapter: *mut *mut core_device_proxy::AdapterHandle,
-    out_handshake: *mut *mut rsd::RsdHandshakeHandle,
-    message: *mut std::ffi::c_char,
-    message_capacity: usize,
-) -> i32 {
-    unsafe {
-        pilot_cellular_coredevice::pilot_classic_coredevice_tunnel_impl(
-            classic_pairing_path, host, out_adapter, out_handshake, message, message_capacity,
-        )
-    }
-}
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pilot_ddi_mount_personalized(
@@ -701,8 +667,6 @@ data = Path(sys.argv[1]).read_bytes()
 required = [
     b"pilot_xctest_service_probe",
     b"pilot_ddi_mount_personalized",
-    b"pilot_classic_bootstrap_rsd",
-    b"pilot_classic_coredevice_tunnel",
     b"pilot_xctest_dtx_bootstrap",
     b"pilot_xctest_runner_discovery",
     b"pilot_xctest_metadata",

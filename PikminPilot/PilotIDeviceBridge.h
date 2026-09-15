@@ -53,6 +53,19 @@ int32_t PPProbeCellularRPPairingInterfaces(
     size_t messageCapacity
 );
 
+/// Stage 11.5.4.8 IPv6 cellular endpoint discriminator. Enumerates IPv6
+/// addresses on lo0/en0/pdp_ip*/utun*, preserving interface scope for
+/// link-local addresses, TCP-probes :49152, then runs full RPPairing -> RSD
+/// on each accepting endpoint. selectedHost receives the first endpoint that
+/// completes RSD (for example fe80::1234%pdp_ip0).
+int32_t PPProbeCellularRPPairingIPv6Interfaces(
+    const char *pairingPath,
+    char *selectedHost,
+    size_t selectedHostCapacity,
+    char *message,
+    size_t messageCapacity
+);
+
 /// Creates an on-device RPPairing tunnel to host:port and performs an RSD
 /// handshake. Returns 0 on success.
 int32_t PPProbeRSD(

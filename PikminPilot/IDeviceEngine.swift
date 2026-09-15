@@ -77,6 +77,37 @@ actor IDeviceEngine {
         )
     }
 
+    /// Stage 11.5.4.8: enumerate scoped IPv6 endpoints on cellular/utun/loopback
+    /// and run the full RPPairing -> RSD path against any accepting :49152 socket.
+    func probeCellularRPPairingIPv6Interfaces() -> (result: Result, selectedHost: String?) {
+        let messageCapacity = 16384
+        let hostCapacity = 256
+        let message = UnsafeMutablePointer<CChar>.allocate(capacity: messageCapacity)
+        let hostBuffer = UnsafeMutablePointer<CChar>.allocate(capacity: hostCapacity)
+        message.initialize(repeating: 0, count: messageCapacity)
+        hostBuffer.initialize(repeating: 0, count: hostCapacity)
+        defer {
+            message.deallocate()
+            hostBuffer.deallocate()
+        }
+
+        let code: Int32 = pairingPath.withCString { path in
+            PPProbeCellularRPPairingIPv6Interfaces(
+                path,
+                hostBuffer,
+                hostCapacity,
+                message,
+                messageCapacity
+            )
+        }
+        let text = String(cString: message)
+        let selected = hostBuffer[0] == 0 ? nil : String(cString: hostBuffer)
+        return (
+            Result(ok: code == 0, message: text.isEmpty ? "code=\(code)" : text),
+            selected
+        )
+    }
+
     func probeRSD() -> Result {
         callBridge { path, message, capacity in
             host.withCString { hostCString in

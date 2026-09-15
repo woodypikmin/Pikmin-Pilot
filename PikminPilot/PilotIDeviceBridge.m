@@ -8,12 +8,19 @@
 #import <sys/socket.h>
 #import <ifaddrs.h>
 #import <netdb.h>
+#import <net/if.h>
 #import <unistd.h>
 #import <errno.h>
 #import <fcntl.h>
 #import <sys/select.h>
 #import <stdio.h>
 
+static BOOL PPBuildNumericSocketAddress(
+    const char *host,
+    uint16_t port,
+    struct sockaddr_storage *storage,
+    socklen_t *lengthOut
+);
 
 
 extern int32_t pilot_xctest_metadata(
@@ -76,25 +83,6 @@ extern int32_t pilot_xctest_execute_dispatch_tail(
     size_t message_capacity
 );
 
-// Stage 11.5.4.6 classic-pairing bootstrap and cellular CoreDevice escape.
-extern int32_t pilot_classic_bootstrap_rsd(
-    struct AdapterHandle *adapter,
-    struct RsdHandshakeHandle *handshake,
-    const char *output_path,
-    const char *host_id,
-    const char *system_buid,
-    char *message,
-    size_t message_capacity
-);
-
-extern int32_t pilot_classic_coredevice_tunnel(
-    const char *classic_pairing_path,
-    const char *host,
-    struct AdapterHandle **out_adapter,
-    struct RsdHandshakeHandle **out_handshake,
-    char *message,
-    size_t message_capacity
-);
 
 // Stage 11.3.2 phone-local Personalized DDI mount export.
 extern int32_t pilot_ddi_mount_personalized(
@@ -442,6 +430,77 @@ static NSString *PPProbeTCPIngress(NSString *host, uint16_t port, BOOL *connecte
     return [NSString stringWithFormat:@"TCP=CONNECTED local=%@ if=%@", localText, interfaceName];
 }
 
+static NSString *PPFormatSockaddr(const struct sockaddr *sa, socklen_t length) {
+    if (sa == NULL) return @"?";
+    char host[NI_MAXHOST] = {0};
+    char service[NI_MAXSERV] = {0};
+    int rc = getnameinfo(sa, length, host, sizeof(host), service, sizeof(service),
+                         NI_NUMERICHOST | NI_NUMERICSERV);
+    if (rc != 0) return @"?";
+    if (sa->sa_family == AF_INET6) {
+        return [NSString stringWithFormat:@"[%s]:%s", host, service];
+    }
+    return [NSString stringWithFormat:@"%s:%s", host, service];
+}
+
+static NSString *PPProbeTCPNumeric(NSString *host, uint16_t port, BOOL *connectedOut) {
+    if (connectedOut != NULL) *connectedOut = NO;
+    struct sockaddr_storage address;
+    socklen_t addressLength = 0;
+    if (!PPBuildNumericSocketAddress(host.UTF8String, port, &address, &addressLength)) {
+        return @"TCP=BAD-ADDRESS";
+    }
+
+    int fd = socket(address.ss_family, SOCK_STREAM, 0);
+    if (fd < 0) {
+        int e = errno;
+        return [NSString stringWithFormat:@"TCP=SOCKET-FAIL errno=%d %@", e, PPErrnoText(e)];
+    }
+    int oldFlags = fcntl(fd, F_GETFL, 0);
+    if (oldFlags >= 0) (void)fcntl(fd, F_SETFL, oldFlags | O_NONBLOCK);
+
+    int rc = connect(fd, (const struct sockaddr *)&address, addressLength);
+    if (rc != 0 && errno == EINPROGRESS) {
+        fd_set writeSet;
+        FD_ZERO(&writeSet);
+        FD_SET(fd, &writeSet);
+        struct timeval tv = { .tv_sec = 2, .tv_usec = 0 };
+        rc = select(fd + 1, NULL, &writeSet, NULL, &tv);
+        if (rc > 0 && FD_ISSET(fd, &writeSet)) {
+            int socketError = 0;
+            socklen_t errorLength = (socklen_t)sizeof(socketError);
+            if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &socketError, &errorLength) == 0 && socketError == 0) {
+                rc = 0;
+            } else {
+                errno = socketError != 0 ? socketError : errno;
+                rc = -1;
+            }
+        } else if (rc == 0) {
+            errno = ETIMEDOUT;
+            rc = -1;
+        } else {
+            rc = -1;
+        }
+    }
+    if (rc != 0) {
+        int e = errno;
+        close(fd);
+        return [NSString stringWithFormat:@"TCP=FAIL errno=%d %@", e, PPErrnoText(e)];
+    }
+    if (oldFlags >= 0) (void)fcntl(fd, F_SETFL, oldFlags);
+
+    struct sockaddr_storage local;
+    memset(&local, 0, sizeof(local));
+    socklen_t localLength = sizeof(local);
+    NSString *localText = @"?";
+    if (getsockname(fd, (struct sockaddr *)&local, &localLength) == 0) {
+        localText = PPFormatSockaddr((const struct sockaddr *)&local, localLength);
+    }
+    close(fd);
+    if (connectedOut != NULL) *connectedOut = YES;
+    return [NSString stringWithFormat:@"TCP=CONNECTED local=%@", localText];
+}
+
 int32_t PPProbeCellularRPPairingIngress(char *message, size_t messageCapacity) {
     BOOL peerConnected = NO;
     NSString *peer = PPProbeTCPIngress(@"10.7.0.1", 49152, &peerConnected);
@@ -602,6 +661,67 @@ static int32_t PPLoadPairing(
     return 0;
 }
 
+
+static BOOL PPBuildNumericSocketAddress(
+    const char *host,
+    uint16_t port,
+    struct sockaddr_storage *storage,
+    socklen_t *lengthOut
+) {
+    if (host == NULL || storage == NULL || lengthOut == NULL) {
+        return NO;
+    }
+    memset(storage, 0, sizeof(*storage));
+
+    struct sockaddr_in *v4 = (struct sockaddr_in *)storage;
+#if defined(__APPLE__)
+    v4->sin_len = sizeof(*v4);
+#endif
+    v4->sin_family = AF_INET;
+    v4->sin_port = htons(port);
+    if (inet_pton(AF_INET, host, &v4->sin_addr) == 1) {
+        *lengthOut = (socklen_t)sizeof(*v4);
+        return YES;
+    }
+
+    NSString *text = [NSString stringWithUTF8String:host];
+    if (text.length == 0) {
+        return NO;
+    }
+    NSString *addressPart = text;
+    NSString *scopePart = nil;
+    NSRange percent = [text rangeOfString:@"%" options:NSBackwardsSearch];
+    if (percent.location != NSNotFound) {
+        addressPart = [text substringToIndex:percent.location];
+        scopePart = [text substringFromIndex:percent.location + 1];
+    }
+
+    struct sockaddr_in6 *v6 = (struct sockaddr_in6 *)storage;
+#if defined(__APPLE__)
+    v6->sin6_len = sizeof(*v6);
+#endif
+    v6->sin6_family = AF_INET6;
+    v6->sin6_port = htons(port);
+    if (inet_pton(AF_INET6, addressPart.UTF8String, &v6->sin6_addr) != 1) {
+        return NO;
+    }
+    if (scopePart.length > 0) {
+        char *end = NULL;
+        unsigned long numeric = strtoul(scopePart.UTF8String, &end, 10);
+        if (end != NULL && *end == '\0' && numeric > 0 && numeric <= UINT32_MAX) {
+            v6->sin6_scope_id = (uint32_t)numeric;
+        } else {
+            unsigned int index = if_nametoindex(scopePart.UTF8String);
+            if (index == 0) {
+                return NO;
+            }
+            v6->sin6_scope_id = index;
+        }
+    }
+    *lengthOut = (socklen_t)sizeof(*v6);
+    return YES;
+}
+
 static int32_t PPCreateRPPairingTunnelOnly(
     const char *pairingPath,
     const char *host,
@@ -633,27 +753,18 @@ static int32_t PPCreateRPPairingTunnelOnly(
         return loadResult;
     }
 
-    struct sockaddr_in address;
-    memset(&address, 0, sizeof(address));
-
-#if defined(__APPLE__)
-    address.sin_len = sizeof(address);
-#endif
-
-    address.sin_family = AF_INET;
-    address.sin_port = htons(port);
-
-    if (host == NULL ||
-        inet_pton(AF_INET, host, &address.sin_addr) != 1) {
+    struct sockaddr_storage address;
+    socklen_t addressLength = 0;
+    if (!PPBuildNumericSocketAddress(host, port, &address, &addressLength)) {
         rp_pairing_file_free(pairing);
-        PPWriteMessage(message, capacity, @"Invalid IPv4 address");
+        PPWriteMessage(message, capacity, @"Invalid numeric IP address/scope");
         return -21;
     }
 
     struct IdeviceFfiError *error =
         tunnel_create_rppairing(
             (const idevice_sockaddr *)&address,
-            (idevice_socklen_t)sizeof(address),
+            (idevice_socklen_t)addressLength,
             "Pikmin Pilot",
             pairing,
             NULL,
@@ -694,32 +805,10 @@ static int32_t PPCreateRPPairingTunnelOnly(
     return 0;
 }
 
-static NSString *PPStablePairingIdentity(NSString *key) {
-    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    NSString *value = [defaults stringForKey:key];
-    if (value.length > 0) {
-        return value;
-    }
-    value = [NSUUID UUID].UUIDString;
-    [defaults setObject:value forKey:key];
-    return value;
-}
 
-static NSString *PPClassicPairingSidecarPath(const char *pairingPath) {
-    if (pairingPath == NULL) {
-        return nil;
-    }
-    NSString *remote = [NSString stringWithUTF8String:pairingPath];
-    if (remote.length == 0) {
-        return nil;
-    }
-    return [[remote stringByDeletingLastPathComponent]
-        stringByAppendingPathComponent:@"lockdown_pair_record.plist"];
-}
-
-// Stage 11.5.4.6: keep the proven 11.5.3 raw RPPairing path first. Only when
-// that first-hop fails do we try a separately cached classic lockdown record
-// through CoreDeviceProxy. This avoids :49152/createListener entirely.
+// Stage 11.5.4.8: preserve the Stage 11.5.3 raw RPPairing transport.
+// The only change is that PPCreateRPPairingTunnelOnly now accepts numeric
+// IPv4 or IPv6 endpoints (including %interface scope for link-local IPv6).
 static int32_t PPCreateTunnel(
     const char *pairingPath,
     const char *host,
@@ -729,86 +818,9 @@ static int32_t PPCreateTunnel(
     char *message,
     size_t capacity
 ) {
-    char rpMessage[4096] = {0};
-    int32_t rpResult = PPCreateRPPairingTunnelOnly(
-        pairingPath,
-        host,
-        port,
-        outAdapter,
-        outHandshake,
-        rpMessage,
-        sizeof(rpMessage)
+    return PPCreateRPPairingTunnelOnly(
+        pairingPath, host, port, outAdapter, outHandshake, message, capacity
     );
-    if (rpResult == 0) {
-        if (message != NULL && capacity > 0) {
-            message[0] = '\0';
-        }
-        return 0;
-    }
-
-    NSString *rpDetail = rpMessage[0] != '\0'
-        ? [NSString stringWithUTF8String:rpMessage]
-        : [NSString stringWithFormat:@"RPPairing failed code=%d", rpResult];
-
-    NSString *sidecar = PPClassicPairingSidecarPath(pairingPath);
-    if (sidecar.length == 0 || ![[NSFileManager defaultManager] fileExistsAtPath:sidecar]) {
-        PPWriteMessage(
-            message,
-            capacity,
-            [NSString stringWithFormat:
-             @"%@ • classic-sidecar=missing • run START PILOT once with Wi-Fi ON to mint lockdown_pair_record.plist",
-             rpDetail]
-        );
-        return rpResult;
-    }
-
-    NSMutableArray<NSString *> *classicFailures = [NSMutableArray array];
-    NSArray<NSString *> *candidates = @[ @"127.0.0.1", @"10.7.0.1" ];
-    for (NSString *candidate in candidates) {
-        char classicMessage[4096] = {0};
-        *outAdapter = NULL;
-        *outHandshake = NULL;
-        int32_t classicResult = pilot_classic_coredevice_tunnel(
-            sidecar.fileSystemRepresentation,
-            candidate.UTF8String,
-            outAdapter,
-            outHandshake,
-            classicMessage,
-            sizeof(classicMessage)
-        );
-        NSString *classicDetail = classicMessage[0] != '\0'
-            ? [NSString stringWithUTF8String:classicMessage]
-            : [NSString stringWithFormat:@"host=%@ code=%d", candidate, classicResult];
-
-        if (classicResult == 0 && *outAdapter != NULL && *outHandshake != NULL) {
-            PPWriteMessage(
-                message,
-                capacity,
-                [NSString stringWithFormat:@"%@ • originalRP={%@}", classicDetail, rpDetail]
-            );
-            return 0;
-        }
-
-        if (*outHandshake != NULL) {
-            rsd_handshake_free(*outHandshake);
-            *outHandshake = NULL;
-        }
-        if (*outAdapter != NULL) {
-            adapter_free(*outAdapter);
-            *outAdapter = NULL;
-        }
-        [classicFailures addObject:classicDetail];
-    }
-
-    PPWriteMessage(
-        message,
-        capacity,
-        [NSString stringWithFormat:
-         @"STAGE 11.5.4.6 CLASSIC COREDEVICE CELLULAR ESCAPE FAILED ❌ • %@ • classic={%@}",
-         rpDetail,
-         [classicFailures componentsJoinedByString:@" | "]]
-    );
-    return rpResult;
 }
 
 int32_t PPValidateRPPairingFile(
@@ -892,43 +904,6 @@ int32_t PPProbeRSD(
         return tunnelResult;
     }
 
-    NSString *transportDiag = (message != NULL && message[0] != '\0')
-        ? [NSString stringWithUTF8String:message]
-        : @"";
-    BOOL usedClassic = [transportDiag containsString:@"CLASSIC COREDEVICE RSD READY"];
-
-    // Mint a separate classic lockdown record only while the known-good raw
-    // RPPairing path is already alive (normally Wi-Fi). Never overwrite the
-    // user's remote rp_pairing_file.plist. A pending Trust prompt is reported
-    // but does not turn the already-good RSD probe into a failure.
-    NSString *bootstrapDiag = @"";
-    NSString *sidecar = PPClassicPairingSidecarPath(pairingPath);
-    if (!usedClassic && sidecar.length > 0) {
-        if ([[NSFileManager defaultManager] fileExistsAtPath:sidecar]) {
-            bootstrapDiag = @"classicSidecar=ready";
-        } else {
-            char bootstrapMessage[4096] = {0};
-            // Keep these identities stable across Trust-prompt retries. A new
-            // HostID every START would create a new pairing request instead of
-            // completing the request the user just approved.
-            NSString *hostID = PPStablePairingIdentity(@"PikminPilot.classicHostID");
-            NSString *systemBUID = PPStablePairingIdentity(@"PikminPilot.classicSystemBUID");
-            int32_t bootstrapResult = pilot_classic_bootstrap_rsd(
-                adapter,
-                handshake,
-                sidecar.fileSystemRepresentation,
-                hostID.UTF8String,
-                systemBUID.UTF8String,
-                bootstrapMessage,
-                sizeof(bootstrapMessage)
-            );
-            NSString *detail = bootstrapMessage[0] != '\0'
-                ? [NSString stringWithUTF8String:bootstrapMessage]
-                : [NSString stringWithFormat:@"classic bootstrap code=%d", bootstrapResult];
-            bootstrapDiag = detail;
-        }
-    }
-
     char *uuid = NULL;
     struct IdeviceFfiError *uuidError =
         rsd_get_uuid(handshake, &uuid);
@@ -948,14 +923,7 @@ int32_t PPProbeRSD(
     rsd_handshake_free(handshake);
     adapter_free(adapter);
 
-    NSMutableArray<NSString *> *parts = [NSMutableArray arrayWithObject:uuidText];
-    if (transportDiag.length > 0) {
-        [parts addObject:transportDiag];
-    }
-    if (bootstrapDiag.length > 0) {
-        [parts addObject:bootstrapDiag];
-    }
-    PPWriteMessage(message, messageCapacity, [parts componentsJoinedByString:@" • "]);
+    PPWriteMessage(message, messageCapacity, uuidText);
     return 0;
 }
 
@@ -1069,6 +1037,99 @@ int32_t PPProbeCellularRPPairingInterfaces(
         : @"no en0/pdp_ip*/utun* IPv4 candidates";
     PPWriteMessage(message, messageCapacity,
         [NSString stringWithFormat:@"CELLULAR IF RP FAILED ❌ • %@", candidateText]);
+    return 1;
+}
+
+int32_t PPProbeCellularRPPairingIPv6Interfaces(
+    const char *pairingPath,
+    char *selectedHost,
+    size_t selectedHostCapacity,
+    char *message,
+    size_t messageCapacity
+) {
+    if (selectedHost != NULL && selectedHostCapacity > 0) selectedHost[0] = '\0';
+    if (pairingPath == NULL) {
+        PPWriteMessage(message, messageCapacity, @"IPV6 RP PROBE FAILED • missing pairing path");
+        return -40;
+    }
+
+    struct ifaddrs *interfaces = NULL;
+    if (getifaddrs(&interfaces) != 0 || interfaces == NULL) {
+        int e = errno;
+        PPWriteMessage(message, messageCapacity,
+            [NSString stringWithFormat:@"IPV6 RP PROBE FAILED • getifaddrs errno=%d %@", e, PPErrnoText(e)]);
+        return -41;
+    }
+
+    NSMutableArray<NSDictionary<NSString *, NSString *> *> *candidates = [NSMutableArray array];
+    NSMutableSet<NSString *> *seen = [NSMutableSet set];
+    for (struct ifaddrs *cursor = interfaces; cursor != NULL; cursor = cursor->ifa_next) {
+        if (cursor->ifa_addr == NULL || cursor->ifa_addr->sa_family != AF_INET6) continue;
+        NSString *name = cursor->ifa_name ? [NSString stringWithUTF8String:cursor->ifa_name] : @"?";
+        if (![name isEqualToString:@"lo0"] && ![name isEqualToString:@"en0"] &&
+            ![name hasPrefix:@"pdp_ip"] && ![name hasPrefix:@"utun"]) continue;
+
+        const struct sockaddr_in6 *sin6 = (const struct sockaddr_in6 *)cursor->ifa_addr;
+        if (IN6_IS_ADDR_UNSPECIFIED(&sin6->sin6_addr) || IN6_IS_ADDR_MULTICAST(&sin6->sin6_addr)) continue;
+        char raw[INET6_ADDRSTRLEN] = {0};
+        if (inet_ntop(AF_INET6, &sin6->sin6_addr, raw, sizeof(raw)) == NULL) continue;
+        NSString *base = [NSString stringWithUTF8String:raw];
+        NSString *host = base;
+        if (IN6_IS_ADDR_LINKLOCAL(&sin6->sin6_addr)) {
+            host = [NSString stringWithFormat:@"%@%%%@", base, name];
+        }
+        NSString *dedupe = [NSString stringWithFormat:@"%@|%@", name, host];
+        if ([seen containsObject:dedupe]) continue;
+        [seen addObject:dedupe];
+        [candidates addObject:@{ @"name": name, @"host": host }];
+    }
+    freeifaddrs(interfaces);
+
+    [candidates sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+        NSString *an = a[@"name"] ?: @"";
+        NSString *bn = b[@"name"] ?: @"";
+        NSInteger ar = [an hasPrefix:@"pdp_ip"] ? 0 : ([an hasPrefix:@"utun"] ? 1 : ([an isEqualToString:@"lo0"] ? 2 : 3));
+        NSInteger br = [bn hasPrefix:@"pdp_ip"] ? 0 : ([bn hasPrefix:@"utun"] ? 1 : ([bn isEqualToString:@"lo0"] ? 2 : 3));
+        if (ar != br) return ar < br ? NSOrderedAscending : NSOrderedDescending;
+        NSComparisonResult r = [an compare:bn];
+        if (r != NSOrderedSame) return r;
+        return [(a[@"host"] ?: @"") compare:(b[@"host"] ?: @"")];
+    }];
+
+    NSMutableArray<NSString *> *reports = [NSMutableArray array];
+    for (NSDictionary *candidate in candidates) {
+        NSString *name = candidate[@"name"] ?: @"?";
+        NSString *host = candidate[@"host"] ?: @"?";
+        BOOL connected = NO;
+        NSString *tcp = PPProbeTCPNumeric(host, 49152, &connected);
+        if (!connected) {
+            [reports addObject:[NSString stringWithFormat:@"%@=[%@]:49152 {%@}", name, host, tcp]];
+            continue;
+        }
+
+        char rsdMessage[4096] = {0};
+        int32_t rsdResult = PPProbeRSD(pairingPath, host.UTF8String, 49152,
+                                       rsdMessage, sizeof(rsdMessage));
+        NSString *rsd = rsdMessage[0] != '\0'
+            ? [NSString stringWithUTF8String:rsdMessage]
+            : [NSString stringWithFormat:@"code=%d", rsdResult];
+        [reports addObject:[NSString stringWithFormat:@"%@=[%@]:49152 {%@; FULL-RP=%@}", name, host, tcp, rsd]];
+        if (rsdResult == 0) {
+            if (selectedHost != NULL && selectedHostCapacity > 0) {
+                snprintf(selectedHost, selectedHostCapacity, "%s", host.UTF8String);
+            }
+            PPWriteMessage(message, messageCapacity,
+                [NSString stringWithFormat:@"IPV6 RP ENDPOINT READY ✅ • selected=[%@]:49152 if=%@ • %@",
+                 host, name, [reports componentsJoinedByString:@" | "]]);
+            return 0;
+        }
+    }
+
+    NSString *detail = reports.count > 0
+        ? [reports componentsJoinedByString:@" | "]
+        : @"no lo0/en0/pdp_ip*/utun* IPv6 candidates";
+    PPWriteMessage(message, messageCapacity,
+        [NSString stringWithFormat:@"IPV6 RP ENDPOINT FAILED ❌ • %@", detail]);
     return 1;
 }
 
