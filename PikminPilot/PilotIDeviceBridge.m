@@ -1866,3 +1866,317 @@ int32_t PPRunPhoneLocalXCTestDispatchTail(
     return result;
 }
 
+
+// -----------------------------------------------------------------------------
+// Stage 11.5.4.9 — persistent RSD session for cellular escape
+// -----------------------------------------------------------------------------
+// Raw RemotePairing :49152 can disappear when cellular is the active physical
+// interface. The cellular workflow therefore establishes one RPPairing/RSD
+// session while the listener is temporarily available, keeps Adapter/RSD alive,
+// restores cellular, then reuses the already-established session for every
+// subsequent CoreDevice/DVT/XCTest operation. No new :49152 connection is made
+// by the session-backed calls below.
+
+typedef struct PPPhoneLocalSession {
+    struct AdapterHandle *adapter;
+    struct RsdHandshakeHandle *handshake;
+} PPPhoneLocalSession;
+
+static PPPhoneLocalSession *PPSession(uintptr_t raw, char *message, size_t capacity) {
+    PPPhoneLocalSession *session = (PPPhoneLocalSession *)raw;
+    if (session == NULL || session->adapter == NULL || session->handshake == NULL) {
+        PPWriteMessage(message, capacity, @"PERSISTENT RSD SESSION INVALID");
+        return NULL;
+    }
+    return session;
+}
+
+uintptr_t PPPhoneLocalSessionCreate(
+    const char *pairingPath,
+    const char *host,
+    uint16_t port,
+    char *message,
+    size_t messageCapacity
+) {
+    struct AdapterHandle *adapter = NULL;
+    struct RsdHandshakeHandle *handshake = NULL;
+    int32_t tunnelResult = PPCreateTunnel(
+        pairingPath, host, port, &adapter, &handshake, message, messageCapacity
+    );
+    if (tunnelResult != 0 || adapter == NULL || handshake == NULL) {
+        if (handshake != NULL) rsd_handshake_free(handshake);
+        if (adapter != NULL) adapter_free(adapter);
+        return (uintptr_t)0;
+    }
+
+    PPPhoneLocalSession *session = calloc(1, sizeof(PPPhoneLocalSession));
+    if (session == NULL) {
+        rsd_handshake_free(handshake);
+        adapter_free(adapter);
+        PPWriteMessage(message, messageCapacity, @"PERSISTENT RSD SESSION ALLOC FAILED");
+        return (uintptr_t)0;
+    }
+    session->adapter = adapter;
+    session->handshake = handshake;
+
+    char *uuid = NULL;
+    NSString *detail = @"RSD connected";
+    struct IdeviceFfiError *uuidError = rsd_get_uuid(handshake, &uuid);
+    if (uuidError == NULL && uuid != NULL) {
+        detail = [NSString stringWithFormat:@"UUID %s", uuid];
+        idevice_string_free(uuid);
+    } else if (uuidError != NULL) {
+        idevice_error_free(uuidError);
+    }
+    PPWriteMessage(message, messageCapacity,
+        [NSString stringWithFormat:@"PERSISTENT RSD SESSION READY ✅ • %@ • endpoint=%s:%u",
+         detail, host ?: "?", (unsigned)port]);
+    return (uintptr_t)session;
+}
+
+void PPPhoneLocalSessionFree(uintptr_t raw) {
+    PPPhoneLocalSession *session = (PPPhoneLocalSession *)raw;
+    if (session == NULL) return;
+    if (session->handshake != NULL) rsd_handshake_free(session->handshake);
+    if (session->adapter != NULL) adapter_free(session->adapter);
+    session->handshake = NULL;
+    session->adapter = NULL;
+    free(session);
+}
+
+int32_t PPPhoneLocalSessionProbeXCTestServices(uintptr_t raw, char *message, size_t messageCapacity) {
+    PPPhoneLocalSession *session = PPSession(raw, message, messageCapacity);
+    if (session == NULL) return -240;
+    return pilot_xctest_service_probe(session->handshake, message, messageCapacity);
+}
+
+int32_t PPPhoneLocalSessionBootstrapXCTestDTX(uintptr_t raw, char *message, size_t messageCapacity) {
+    PPPhoneLocalSession *session = PPSession(raw, message, messageCapacity);
+    if (session == NULL) return -259;
+    return pilot_xctest_dtx_bootstrap(
+        session->adapter, session->handshake, message, messageCapacity
+    );
+}
+
+int32_t PPPhoneLocalSessionMountPersonalizedDDI(
+    uintptr_t raw,
+    const char *imagePath,
+    const char *buildManifestPath,
+    const char *trustCachePath,
+    char *message,
+    size_t messageCapacity
+) {
+    PPPhoneLocalSession *session = PPSession(raw, message, messageCapacity);
+    if (session == NULL) return -241;
+    if (imagePath == NULL || buildManifestPath == NULL || trustCachePath == NULL) {
+        PPWriteMessage(message, messageCapacity, @"DDI payload path is NULL");
+        return -242;
+    }
+    return pilot_ddi_mount_personalized(
+        session->adapter, session->handshake,
+        imagePath, buildManifestPath, trustCachePath,
+        message, messageCapacity
+    );
+}
+
+int32_t PPPhoneLocalSessionInstallRunnerIPA(
+    uintptr_t raw,
+    const char *localIPAPath,
+    char *message,
+    size_t messageCapacity
+) {
+    PPPhoneLocalSession *session = PPSession(raw, message, messageCapacity);
+    if (session == NULL) return -243;
+    if (localIPAPath == NULL || localIPAPath[0] == '\0') {
+        PPWriteMessage(message, messageCapacity, @"Runner IPA path is empty");
+        return -244;
+    }
+    return pilot_runner_install_ipa(
+        session->adapter, session->handshake, localIPAPath, message, messageCapacity
+    );
+}
+
+int32_t PPPhoneLocalSessionDiscoverRunner(uintptr_t raw, char *message, size_t messageCapacity) {
+    PPPhoneLocalSession *session = PPSession(raw, message, messageCapacity);
+    if (session == NULL) return -245;
+    return pilot_xctest_runner_discovery(
+        session->adapter, session->handshake, message, messageCapacity
+    );
+}
+
+int32_t PPPhoneLocalSessionLaunchBundleID(
+    uintptr_t raw,
+    const char *bundleID,
+    char *message,
+    size_t messageCapacity
+) {
+    PPPhoneLocalSession *session = PPSession(raw, message, messageCapacity);
+    if (session == NULL) return -246;
+    if (bundleID == NULL || bundleID[0] == '\0') {
+        PPWriteMessage(message, messageCapacity, @"Bundle ID is empty");
+        return -247;
+    }
+
+    struct AppServiceHandle *appService = NULL;
+    struct IdeviceFfiError *connectError =
+        app_service_connect_rsd(session->adapter, session->handshake, &appService);
+    if (connectError != NULL) {
+        return PPConsumeError(connectError, message, messageCapacity,
+                              @"Persistent AppService connect failed");
+    }
+    if (appService == NULL) {
+        PPWriteMessage(message, messageCapacity, @"Persistent AppService returned NULL");
+        return -248;
+    }
+
+    struct LaunchResponseC *response = NULL;
+    struct IdeviceFfiError *launchError = app_service_launch_app(
+        appService, bundleID, NULL, 0, 0, 0, NULL, &response
+    );
+    if (launchError != NULL) {
+        app_service_free(appService);
+        return PPConsumeError(launchError, message, messageCapacity,
+                              @"Persistent bundle launch failed");
+    }
+    if (response != NULL) app_service_free_launch_response(response);
+    app_service_free(appService);
+    PPWriteMessage(message, messageCapacity,
+        [NSString stringWithFormat:@"PERSISTENT RSD BUNDLE LAUNCH SENT • %s", bundleID]);
+    return 0;
+}
+
+int32_t PPPhoneLocalSessionTakeScreenshot(
+    uintptr_t raw,
+    const char *outputPath,
+    char *message,
+    size_t messageCapacity
+) {
+    PPPhoneLocalSession *session = PPSession(raw, message, messageCapacity);
+    if (session == NULL) return -249;
+    if (outputPath == NULL || outputPath[0] == '\0') {
+        PPWriteMessage(message, messageCapacity, @"Screenshot output path is missing");
+        return -250;
+    }
+
+    struct RemoteServerHandle *remoteServer = NULL;
+    struct IdeviceFfiError *remoteError =
+        remote_server_connect_rsd(session->adapter, session->handshake, &remoteServer);
+    if (remoteError != NULL) {
+        return PPConsumeError(remoteError, message, messageCapacity,
+                              @"Persistent DVT RemoteServer connect failed");
+    }
+    if (remoteServer == NULL) {
+        PPWriteMessage(message, messageCapacity, @"Persistent DVT RemoteServer returned NULL");
+        return -251;
+    }
+
+    struct ScreenshotClientHandle *client = NULL;
+    struct IdeviceFfiError *clientError = screenshot_client_new(remoteServer, &client);
+    if (clientError != NULL) {
+        remote_server_free(remoteServer);
+        return PPConsumeError(clientError, message, messageCapacity,
+                              @"Persistent DVT Screenshot channel failed");
+    }
+    if (client == NULL) {
+        remote_server_free(remoteServer);
+        PPWriteMessage(message, messageCapacity, @"Persistent DVT Screenshot returned NULL client");
+        return -252;
+    }
+
+    uint8_t *imageBytes = NULL;
+    uintptr_t imageLength = 0;
+    struct IdeviceFfiError *shotError =
+        screenshot_client_take_screenshot(client, &imageBytes, &imageLength);
+    if (shotError != NULL) {
+        screenshot_client_free(client);
+        remote_server_free(remoteServer);
+        return PPConsumeError(shotError, message, messageCapacity,
+                              @"Persistent DVT Screenshot failed");
+    }
+    if (imageBytes == NULL || imageLength == 0) {
+        if (imageBytes != NULL) idevice_data_free(imageBytes, imageLength);
+        screenshot_client_free(client);
+        remote_server_free(remoteServer);
+        PPWriteMessage(message, messageCapacity, @"Persistent DVT Screenshot returned empty data");
+        return -253;
+    }
+
+    NSData *imageData = [NSData dataWithBytes:imageBytes length:(NSUInteger)imageLength];
+    NSString *path = [NSString stringWithUTF8String:outputPath];
+    NSError *writeError = nil;
+    BOOL wrote = [imageData writeToFile:path options:NSDataWritingAtomic error:&writeError];
+    uintptr_t byteCount = imageLength;
+    idevice_data_free(imageBytes, imageLength);
+    screenshot_client_free(client);
+    remote_server_free(remoteServer);
+    if (!wrote) {
+        PPWriteMessage(message, messageCapacity,
+            [NSString stringWithFormat:@"Persistent screenshot save failed: %@",
+             writeError.localizedDescription ?: @"unknown file write error"]);
+        return -254;
+    }
+    PPWriteMessage(message, messageCapacity,
+        [NSString stringWithFormat:@"PERSISTENT RSD SCREENSHOT OK • %llu bytes",
+         (unsigned long long)byteCount]);
+    return 0;
+}
+
+int32_t PPPhoneLocalSessionXCTestActivate(uintptr_t raw, char *message, size_t messageCapacity) {
+    PPPhoneLocalSession *session = PPSession(raw, message, messageCapacity);
+    if (session == NULL) return -255;
+    return pilot_xctest_execute_activate(
+        session->adapter, session->handshake, message, messageCapacity
+    );
+}
+
+int32_t PPPhoneLocalSessionXCTestTap(
+    uintptr_t raw,
+    double normalizedX,
+    double normalizedY,
+    char *message,
+    size_t messageCapacity
+) {
+    PPPhoneLocalSession *session = PPSession(raw, message, messageCapacity);
+    if (session == NULL) return -256;
+    return pilot_xctest_execute_tap(
+        session->adapter, session->handshake,
+        normalizedX, normalizedY, message, messageCapacity
+    );
+}
+
+int32_t PPPhoneLocalSessionXCTestSwipe(
+    uintptr_t raw,
+    double fromX,
+    double fromY,
+    double toX,
+    double toY,
+    double duration,
+    char *message,
+    size_t messageCapacity
+) {
+    PPPhoneLocalSession *session = PPSession(raw, message, messageCapacity);
+    if (session == NULL) return -257;
+    return pilot_xctest_execute_swipe(
+        session->adapter, session->handshake,
+        fromX, fromY, toX, toY, duration,
+        message, messageCapacity
+    );
+}
+
+int32_t PPPhoneLocalSessionXCTestDispatchTail(
+    uintptr_t raw,
+    double pikminFilterX,
+    double pikminFilterY,
+    int32_t pikminCount,
+    int32_t fastMode,
+    char *message,
+    size_t messageCapacity
+) {
+    PPPhoneLocalSession *session = PPSession(raw, message, messageCapacity);
+    if (session == NULL) return -258;
+    return pilot_xctest_execute_dispatch_tail(
+        session->adapter, session->handshake,
+        pikminFilterX, pikminFilterY, pikminCount, fastMode,
+        message, messageCapacity
+    );
+}

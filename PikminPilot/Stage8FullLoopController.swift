@@ -74,6 +74,47 @@ final class Stage8FullLoopController: ObservableObject {
         }
     }
 
+    // Stage 11.5.4.9: run the same verified 10.3.1 automation core on an
+    // already-established persistent RSD session. This is the cellular escape
+    // path: no operation below is allowed to reconnect to RemotePairing :49152.
+    func startPersistent(
+        engine: IDeviceEngine,
+        transportLabel: String,
+        targetDispatches: Int?,
+        pikminType: PilotPikminType,
+        pikminCount: Int,
+        cargoMode: PilotCargoMode,
+        fastMode: Bool,
+        onStatus: @escaping (String) -> Void,
+        onScreenshot: @escaping (UIImage) -> Void
+    ) {
+        guard !isRunning else { return }
+
+        cancelled = false
+        stopCause = .none
+        stopAfterCurrentRequested = false
+        completedDispatches = 0
+        self.targetDispatches = targetDispatches.flatMap { $0 > 0 ? $0 : nil }
+        self.pikminType = pikminType
+        self.pikminCount = min(12, max(pikminType.minimumCount, pikminCount))
+        self.cargoMode = cargoMode
+        self.fastMode = fastMode
+        logLines.removeAll(keepingCapacity: true)
+        statusSink = onStatus
+        screenshotSink = onScreenshot
+        isRunning = true
+        setPhase("準備中")
+
+        beginBackgroundWindow(label: "persistent-cellular")
+        let goal = self.targetDispatches.map(String.init) ?? "∞"
+        emit("STAGE 11.5.4.9 PERSISTENT CELLULAR RUN START • automation-core=10.3.1 • transport=\(transportLabel) • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • RPPairing-reconnect=DISABLED")
+
+        worker = Task { [weak self] in
+            guard let self else { return }
+            await self.run(engine: engine)
+        }
+    }
+
     /// Finish the item that is already in progress, return to the expedition
     /// list, then stop before starting another round.
     func stopAfterCurrent() {
@@ -189,7 +230,10 @@ final class Stage8FullLoopController: ObservableObject {
 
     private func run(pairingPath: String, host: String) async {
         let engine = IDeviceEngine(pairingPath: pairingPath, host: host, port: 49152)
+        await run(engine: engine)
+    }
 
+    private func run(engine: IDeviceEngine) async {
         do {
             setPhase("啟動 Pikmin")
             let activate = await engine.runXCTestActivateOnly()

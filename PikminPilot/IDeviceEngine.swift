@@ -9,6 +9,7 @@ actor IDeviceEngine {
     private let pairingPath: String
     private let host: String
     private let port: UInt16
+    private var persistentSession: UInt = 0
 
     init(
         pairingPath: String,
@@ -23,6 +24,50 @@ actor IDeviceEngine {
     func validatePairing() -> Result {
         callBridge { path, message, capacity in
             PPValidateRPPairingFile(path, message, capacity)
+        }
+    }
+
+    // Stage 11.5.4.9: keep one already-established RPPairing/RSD tunnel alive
+    // while the physical network changes from temporary Airplane Mode back to
+    // cellular. Session-backed calls below do not reconnect to :49152.
+    func openPersistentSession() -> Result {
+        if persistentSession != 0 {
+            return Result(ok: true, message: "PERSISTENT RSD SESSION ALREADY READY ✅")
+        }
+        let capacity = 8192
+        let buffer = UnsafeMutablePointer<CChar>.allocate(capacity: capacity)
+        buffer.initialize(repeating: 0, count: capacity)
+        defer { buffer.deallocate() }
+
+        let handle: UInt = pairingPath.withCString { path in
+            host.withCString { hostCString in
+                PPPhoneLocalSessionCreate(path, hostCString, port, buffer, capacity)
+            }
+        }
+        let text = String(cString: buffer)
+        guard handle != 0 else {
+            return Result(ok: false, message: text.isEmpty ? "persistent session create failed" : text)
+        }
+        persistentSession = handle
+        return Result(ok: true, message: text.isEmpty ? "PERSISTENT RSD SESSION READY ✅" : text)
+    }
+
+    func closePersistentSession() {
+        guard persistentSession != 0 else { return }
+        PPPhoneLocalSessionFree(persistentSession)
+        persistentSession = 0
+    }
+
+    func hasPersistentSession() -> Bool {
+        persistentSession != 0
+    }
+
+    func probePersistentSessionHealth() -> Result {
+        // This is a real DTX connect over the already-open Adapter, not merely
+        // a cached RSD service-list inspection. It proves the persistent tunnel
+        // still carries traffic after cellular is restored.
+        callPersistent { session, message, capacity in
+            PPPhoneLocalSessionBootstrapXCTestDTX(session, message, capacity)
         }
     }
 
@@ -142,7 +187,12 @@ actor IDeviceEngine {
     }
 
     func runXCTestActivateOnly() -> Result {
-        callBridge { path, message, capacity in
+        if persistentSession != 0 {
+            return callPersistent { session, message, capacity in
+                PPPhoneLocalSessionXCTestActivate(session, message, capacity)
+            }
+        }
+        return callBridge { path, message, capacity in
             host.withCString { hostCString in
                 PPRunPhoneLocalXCTestActivate(path, hostCString, port, message, capacity)
             }
@@ -150,7 +200,12 @@ actor IDeviceEngine {
     }
 
     func runXCTestTap(normalizedX: Double, normalizedY: Double) -> Result {
-        callBridge { path, message, capacity in
+        if persistentSession != 0 {
+            return callPersistent { session, message, capacity in
+                PPPhoneLocalSessionXCTestTap(session, normalizedX, normalizedY, message, capacity)
+            }
+        }
+        return callBridge { path, message, capacity in
             host.withCString { hostCString in
                 PPRunPhoneLocalXCTestTap(
                     path, hostCString, port, normalizedX, normalizedY, message, capacity
@@ -166,7 +221,14 @@ actor IDeviceEngine {
         toY: Double,
         duration: Double
     ) -> Result {
-        callBridge { path, message, capacity in
+        if persistentSession != 0 {
+            return callPersistent { session, message, capacity in
+                PPPhoneLocalSessionXCTestSwipe(
+                    session, fromX, fromY, toX, toY, duration, message, capacity
+                )
+            }
+        }
+        return callBridge { path, message, capacity in
             host.withCString { hostCString in
                 PPRunPhoneLocalXCTestSwipe(
                     path, hostCString, port, fromX, fromY, toX, toY, duration,
@@ -190,7 +252,17 @@ actor IDeviceEngine {
         pikminCount: Int,
         fastMode: Bool
     ) -> Result {
-        callBridge { path, message, capacity in
+        if persistentSession != 0 {
+            return callPersistent { session, message, capacity in
+                PPPhoneLocalSessionXCTestDispatchTail(
+                    session, pikminX, pikminY,
+                    Int32(min(12, max(2, pikminCount))),
+                    Int32(fastMode ? 1 : 0),
+                    message, capacity
+                )
+            }
+        }
+        return callBridge { path, message, capacity in
             host.withCString { hostCString in
                 PPRunPhoneLocalXCTestDispatchTail(
                     path, hostCString, port, pikminX, pikminY,
@@ -207,7 +279,20 @@ actor IDeviceEngine {
         buildManifestPath: String,
         trustCachePath: String
     ) -> Result {
-        callBridge { path, message, capacity in
+        if persistentSession != 0 {
+            return callPersistent { session, message, capacity in
+                imagePath.withCString { imageCString in
+                    buildManifestPath.withCString { manifestCString in
+                        trustCachePath.withCString { trustCString in
+                            PPPhoneLocalSessionMountPersonalizedDDI(
+                                session, imageCString, manifestCString, trustCString, message, capacity
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        return callBridge { path, message, capacity in
             host.withCString { hostCString in
                 imagePath.withCString { imageCString in
                     buildManifestPath.withCString { manifestCString in
@@ -224,7 +309,14 @@ actor IDeviceEngine {
     }
 
     func installXCTestRunnerIPA(localPath: String) -> Result {
-        callBridge { path, message, capacity in
+        if persistentSession != 0 {
+            return callPersistent { session, message, capacity in
+                localPath.withCString { ipaCString in
+                    PPPhoneLocalSessionInstallRunnerIPA(session, ipaCString, message, capacity)
+                }
+            }
+        }
+        return callBridge { path, message, capacity in
             host.withCString { hostCString in
                 localPath.withCString { ipaCString in
                     PPInstallPhoneLocalXCTestRunnerIPA(
@@ -241,7 +333,12 @@ actor IDeviceEngine {
     }
 
     func discoverXCTestRunner() -> Result {
-        callBridge { path, message, capacity in
+        if persistentSession != 0 {
+            return callPersistent { session, message, capacity in
+                PPPhoneLocalSessionDiscoverRunner(session, message, capacity)
+            }
+        }
+        return callBridge { path, message, capacity in
             host.withCString { hostCString in
                 PPDiscoverPhoneLocalXCTestRunner(
                     path,
@@ -269,7 +366,12 @@ actor IDeviceEngine {
     }
 
     func probeXCTestServices() -> Result {
-        callBridge { path, message, capacity in
+        if persistentSession != 0 {
+            return callPersistent { session, message, capacity in
+                PPPhoneLocalSessionProbeXCTestServices(session, message, capacity)
+            }
+        }
+        return callBridge { path, message, capacity in
             host.withCString { hostCString in
                 PPProbePhoneLocalXCTestServices(
                     path,
@@ -283,7 +385,14 @@ actor IDeviceEngine {
     }
 
     func launchBundleID(_ bundleID: String) -> Result {
-        callBridge { path, message, capacity in
+        if persistentSession != 0 {
+            return callPersistent { session, message, capacity in
+                bundleID.withCString { bundleCString in
+                    PPPhoneLocalSessionLaunchBundleID(session, bundleCString, message, capacity)
+                }
+            }
+        }
+        return callBridge { path, message, capacity in
             host.withCString { hostCString in
                 bundleID.withCString { bundleCString in
                     PPLaunchBundleID(
@@ -308,7 +417,14 @@ actor IDeviceEngine {
     }
 
     func takeScreenshot(outputPath: String) -> Result {
-        callBridge { path, message, capacity in
+        if persistentSession != 0 {
+            return callPersistent { session, message, capacity in
+                outputPath.withCString { outputCString in
+                    PPPhoneLocalSessionTakeScreenshot(session, outputCString, message, capacity)
+                }
+            }
+        }
+        return callBridge { path, message, capacity in
             host.withCString { hostCString in
                 outputPath.withCString { outputCString in
                     PPTakePhoneScreenshot(
@@ -322,6 +438,21 @@ actor IDeviceEngine {
                 }
             }
         }
+    }
+
+    private func callPersistent(
+        _ body: (UInt, UnsafeMutablePointer<CChar>, Int) -> Int32
+    ) -> Result {
+        guard persistentSession != 0 else {
+            return Result(ok: false, message: "PERSISTENT RSD SESSION MISSING")
+        }
+        let capacity = 8192
+        let buffer = UnsafeMutablePointer<CChar>.allocate(capacity: capacity)
+        buffer.initialize(repeating: 0, count: capacity)
+        defer { buffer.deallocate() }
+        let code = body(persistentSession, buffer, capacity)
+        let text = String(cString: buffer)
+        return Result(ok: code == 0, message: text.isEmpty ? "persistent idevice result code \(code)" : text)
     }
 
     private func callBridgeWithoutPairing(

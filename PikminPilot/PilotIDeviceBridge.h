@@ -76,6 +76,33 @@ int32_t PPProbeRSD(
     size_t messageCapacity
 );
 
+/// Stage 11.5.4.9 persistent-session escape. Creates one raw RPPairing/RSD
+/// session while the :49152 listener is available (for the cellular workflow,
+/// this is expected to be while Airplane Mode is temporarily enabled).
+/// The returned opaque handle owns AdapterHandle + RsdHandshakeHandle and must
+/// be freed with PPPhoneLocalSessionFree. Returns 0 on failure.
+uintptr_t PPPhoneLocalSessionCreate(
+    const char *pairingPath,
+    const char *host,
+    uint16_t port,
+    char *message,
+    size_t messageCapacity
+);
+
+void PPPhoneLocalSessionFree(uintptr_t session);
+
+int32_t PPPhoneLocalSessionProbeXCTestServices(uintptr_t session, char *message, size_t messageCapacity);
+int32_t PPPhoneLocalSessionBootstrapXCTestDTX(uintptr_t session, char *message, size_t messageCapacity);
+int32_t PPPhoneLocalSessionMountPersonalizedDDI(uintptr_t session, const char *imagePath, const char *buildManifestPath, const char *trustCachePath, char *message, size_t messageCapacity);
+int32_t PPPhoneLocalSessionInstallRunnerIPA(uintptr_t session, const char *localIPAPath, char *message, size_t messageCapacity);
+int32_t PPPhoneLocalSessionDiscoverRunner(uintptr_t session, char *message, size_t messageCapacity);
+int32_t PPPhoneLocalSessionLaunchBundleID(uintptr_t session, const char *bundleID, char *message, size_t messageCapacity);
+int32_t PPPhoneLocalSessionTakeScreenshot(uintptr_t session, const char *outputPath, char *message, size_t messageCapacity);
+int32_t PPPhoneLocalSessionXCTestActivate(uintptr_t session, char *message, size_t messageCapacity);
+int32_t PPPhoneLocalSessionXCTestTap(uintptr_t session, double normalizedX, double normalizedY, char *message, size_t messageCapacity);
+int32_t PPPhoneLocalSessionXCTestSwipe(uintptr_t session, double fromX, double fromY, double toX, double toY, double duration, char *message, size_t messageCapacity);
+int32_t PPPhoneLocalSessionXCTestDispatchTail(uintptr_t session, double pikminFilterX, double pikminFilterY, int32_t pikminCount, int32_t fastMode, char *message, size_t messageCapacity);
+
 /// Mounts the iOS 17+ Personalized Developer Disk Image through
 /// com.apple.mobile.mobile_image_mounter.shim.remote over the same phone-local
 /// RSD transport. Payloads are cached in the app sandbox.
