@@ -374,6 +374,31 @@ jobs:
           unzip -l PikminPilot-Stage11.5.4.11-FULLY-SIGNED-DEVELOPMENT.ipa | grep -F 'PikminPilotTunnel.appex'
           shasum -a 256 PikminPilot-Stage11.5.4.11-FULLY-SIGNED-DEVELOPMENT.ipa | tee PikminPilotSignedSHA256.txt
 
+      - name: Build clean end-user release kit
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${PAIRING_RECORD_B64:-}" ]; then
+            PAIRING_MODE="PERSONALIZED"
+          else
+            PAIRING_MODE="GENERIC"
+          fi
+          export PIKMIN_RELEASE_VERSION="11.5.4.11"
+          export PIKMIN_RELEASE_BUILD="1153"
+          export PIKMIN_PAIRING_MODE="$PAIRING_MODE"
+          scripts/make-release-kit.sh \
+            PikminPilot-Stage11.5.4.11-FULLY-SIGNED-DEVELOPMENT.ipa \
+            PikminPilot-11.5.4.11-END-USER-KIT
+          /usr/bin/zip -qry \
+            PikminPilot-11.5.4.11-END-USER-KIT.zip \
+            PikminPilot-11.5.4.11-END-USER-KIT
+          unzip -t PikminPilot-11.5.4.11-END-USER-KIT.zip >/dev/null
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PikminPilot-11.5.4.11-END-USER-KIT
+          path: PikminPilot-11.5.4.11-END-USER-KIT.zip
+
       - uses: actions/upload-artifact@v4
         with:
           name: PikminPilot-Stage11.5.4.11-FULLY-SIGNED-DEVELOPMENT
