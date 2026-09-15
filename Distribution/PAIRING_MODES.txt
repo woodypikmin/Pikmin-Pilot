@@ -1,0 +1,11 @@
+GENERIC MODE
+- Best for several registered iPhones.
+- One signed IPA can be installed on every device included in the provisioning profiles.
+- Each user imports their own rp_pairing_file.plist once.
+- Pikmin Pilot securely retains/recoveries the local copy after first import.
+
+PERSONALIZED MODE
+- Best for the smoothest one-device install.
+- CI embeds one device-specific RPPairing record into the signed host app.
+- The user installs and opens Pikmin Pilot; the first pairing file picker should be skipped.
+- Build a separate personalized IPA for each iPhone. Never share a personalized IPA as a generic multi-user build.
