@@ -38,6 +38,7 @@ final class Stage8FullLoopController: ObservableObject {
 
     func start(
         pairingPath: String,
+        host: String = "10.7.0.1",
         targetDispatches: Int?,
         pikminType: PilotPikminType,
         pikminCount: Int,
@@ -65,11 +66,11 @@ final class Stage8FullLoopController: ObservableObject {
 
         beginBackgroundWindow(label: "initial")
         let goal = self.targetDispatches.map(String.init) ?? "∞"
-        emit("STAGE 11.5.3 PILOT RUN START • automation-core=10.3.1 • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • Stage 8.2.2 stable loop core • WDA=OFF")
+        emit("STAGE 11.5.3 PILOT RUN START • automation-core=10.3.1 • transportHost=\(host):49152 • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • Stage 8.2.2 stable loop core • WDA=OFF")
 
         worker = Task { [weak self] in
             guard let self else { return }
-            await self.run(pairingPath: pairingPath)
+            await self.run(pairingPath: pairingPath, host: host)
         }
     }
 
@@ -186,8 +187,8 @@ final class Stage8FullLoopController: ObservableObject {
         try? await Task.sleep(nanoseconds: ns)
     }
 
-    private func run(pairingPath: String) async {
-        let engine = IDeviceEngine(pairingPath: pairingPath)
+    private func run(pairingPath: String, host: String) async {
+        let engine = IDeviceEngine(pairingPath: pairingPath, host: host, port: 49152)
 
         do {
             setPhase("啟動 Pikmin")
