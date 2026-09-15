@@ -76,6 +76,26 @@ extern int32_t pilot_xctest_execute_dispatch_tail(
     size_t message_capacity
 );
 
+// Stage 11.5.4.6 classic-pairing bootstrap and cellular CoreDevice escape.
+extern int32_t pilot_classic_bootstrap_rsd(
+    struct AdapterHandle *adapter,
+    struct RsdHandshakeHandle *handshake,
+    const char *output_path,
+    const char *host_id,
+    const char *system_buid,
+    char *message,
+    size_t message_capacity
+);
+
+extern int32_t pilot_classic_coredevice_tunnel(
+    const char *classic_pairing_path,
+    const char *host,
+    struct AdapterHandle **out_adapter,
+    struct RsdHandshakeHandle **out_handshake,
+    char *message,
+    size_t message_capacity
+);
+
 // Stage 11.3.2 phone-local Personalized DDI mount export.
 extern int32_t pilot_ddi_mount_personalized(
     struct AdapterHandle *adapter,
@@ -582,7 +602,7 @@ static int32_t PPLoadPairing(
     return 0;
 }
 
-static int32_t PPCreateTunnel(
+static int32_t PPCreateRPPairingTunnelOnly(
     const char *pairingPath,
     const char *host,
     uint16_t port,
@@ -674,6 +694,123 @@ static int32_t PPCreateTunnel(
     return 0;
 }
 
+static NSString *PPStablePairingIdentity(NSString *key) {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    NSString *value = [defaults stringForKey:key];
+    if (value.length > 0) {
+        return value;
+    }
+    value = [NSUUID UUID].UUIDString;
+    [defaults setObject:value forKey:key];
+    return value;
+}
+
+static NSString *PPClassicPairingSidecarPath(const char *pairingPath) {
+    if (pairingPath == NULL) {
+        return nil;
+    }
+    NSString *remote = [NSString stringWithUTF8String:pairingPath];
+    if (remote.length == 0) {
+        return nil;
+    }
+    return [[remote stringByDeletingLastPathComponent]
+        stringByAppendingPathComponent:@"lockdown_pair_record.plist"];
+}
+
+// Stage 11.5.4.6: keep the proven 11.5.3 raw RPPairing path first. Only when
+// that first-hop fails do we try a separately cached classic lockdown record
+// through CoreDeviceProxy. This avoids :49152/createListener entirely.
+static int32_t PPCreateTunnel(
+    const char *pairingPath,
+    const char *host,
+    uint16_t port,
+    struct AdapterHandle **outAdapter,
+    struct RsdHandshakeHandle **outHandshake,
+    char *message,
+    size_t capacity
+) {
+    char rpMessage[4096] = {0};
+    int32_t rpResult = PPCreateRPPairingTunnelOnly(
+        pairingPath,
+        host,
+        port,
+        outAdapter,
+        outHandshake,
+        rpMessage,
+        sizeof(rpMessage)
+    );
+    if (rpResult == 0) {
+        if (message != NULL && capacity > 0) {
+            message[0] = '\0';
+        }
+        return 0;
+    }
+
+    NSString *rpDetail = rpMessage[0] != '\0'
+        ? [NSString stringWithUTF8String:rpMessage]
+        : [NSString stringWithFormat:@"RPPairing failed code=%d", rpResult];
+
+    NSString *sidecar = PPClassicPairingSidecarPath(pairingPath);
+    if (sidecar.length == 0 || ![[NSFileManager defaultManager] fileExistsAtPath:sidecar]) {
+        PPWriteMessage(
+            message,
+            capacity,
+            [NSString stringWithFormat:
+             @"%@ • classic-sidecar=missing • run START PILOT once with Wi-Fi ON to mint lockdown_pair_record.plist",
+             rpDetail]
+        );
+        return rpResult;
+    }
+
+    NSMutableArray<NSString *> *classicFailures = [NSMutableArray array];
+    NSArray<NSString *> *candidates = @[ @"127.0.0.1", @"10.7.0.1" ];
+    for (NSString *candidate in candidates) {
+        char classicMessage[4096] = {0};
+        *outAdapter = NULL;
+        *outHandshake = NULL;
+        int32_t classicResult = pilot_classic_coredevice_tunnel(
+            sidecar.fileSystemRepresentation,
+            candidate.UTF8String,
+            outAdapter,
+            outHandshake,
+            classicMessage,
+            sizeof(classicMessage)
+        );
+        NSString *classicDetail = classicMessage[0] != '\0'
+            ? [NSString stringWithUTF8String:classicMessage]
+            : [NSString stringWithFormat:@"host=%@ code=%d", candidate, classicResult];
+
+        if (classicResult == 0 && *outAdapter != NULL && *outHandshake != NULL) {
+            PPWriteMessage(
+                message,
+                capacity,
+                [NSString stringWithFormat:@"%@ • originalRP={%@}", classicDetail, rpDetail]
+            );
+            return 0;
+        }
+
+        if (*outHandshake != NULL) {
+            rsd_handshake_free(*outHandshake);
+            *outHandshake = NULL;
+        }
+        if (*outAdapter != NULL) {
+            adapter_free(*outAdapter);
+            *outAdapter = NULL;
+        }
+        [classicFailures addObject:classicDetail];
+    }
+
+    PPWriteMessage(
+        message,
+        capacity,
+        [NSString stringWithFormat:
+         @"STAGE 11.5.4.6 CLASSIC COREDEVICE CELLULAR ESCAPE FAILED ❌ • %@ • classic={%@}",
+         rpDetail,
+         [classicFailures componentsJoinedByString:@" | "]]
+    );
+    return rpResult;
+}
+
 int32_t PPValidateRPPairingFile(
     const char *path,
     char *message,
@@ -755,6 +892,43 @@ int32_t PPProbeRSD(
         return tunnelResult;
     }
 
+    NSString *transportDiag = (message != NULL && message[0] != '\0')
+        ? [NSString stringWithUTF8String:message]
+        : @"";
+    BOOL usedClassic = [transportDiag containsString:@"CLASSIC COREDEVICE RSD READY"];
+
+    // Mint a separate classic lockdown record only while the known-good raw
+    // RPPairing path is already alive (normally Wi-Fi). Never overwrite the
+    // user's remote rp_pairing_file.plist. A pending Trust prompt is reported
+    // but does not turn the already-good RSD probe into a failure.
+    NSString *bootstrapDiag = @"";
+    NSString *sidecar = PPClassicPairingSidecarPath(pairingPath);
+    if (!usedClassic && sidecar.length > 0) {
+        if ([[NSFileManager defaultManager] fileExistsAtPath:sidecar]) {
+            bootstrapDiag = @"classicSidecar=ready";
+        } else {
+            char bootstrapMessage[4096] = {0};
+            // Keep these identities stable across Trust-prompt retries. A new
+            // HostID every START would create a new pairing request instead of
+            // completing the request the user just approved.
+            NSString *hostID = PPStablePairingIdentity(@"PikminPilot.classicHostID");
+            NSString *systemBUID = PPStablePairingIdentity(@"PikminPilot.classicSystemBUID");
+            int32_t bootstrapResult = pilot_classic_bootstrap_rsd(
+                adapter,
+                handshake,
+                sidecar.fileSystemRepresentation,
+                hostID.UTF8String,
+                systemBUID.UTF8String,
+                bootstrapMessage,
+                sizeof(bootstrapMessage)
+            );
+            NSString *detail = bootstrapMessage[0] != '\0'
+                ? [NSString stringWithUTF8String:bootstrapMessage]
+                : [NSString stringWithFormat:@"classic bootstrap code=%d", bootstrapResult];
+            bootstrapDiag = detail;
+        }
+    }
+
     char *uuid = NULL;
     struct IdeviceFfiError *uuidError =
         rsd_get_uuid(handshake, &uuid);
@@ -774,7 +948,14 @@ int32_t PPProbeRSD(
     rsd_handshake_free(handshake);
     adapter_free(adapter);
 
-    PPWriteMessage(message, messageCapacity, uuidText);
+    NSMutableArray<NSString *> *parts = [NSMutableArray arrayWithObject:uuidText];
+    if (transportDiag.length > 0) {
+        [parts addObject:transportDiag];
+    }
+    if (bootstrapDiag.length > 0) {
+        [parts addObject:bootstrapDiag];
+    }
+    PPWriteMessage(message, messageCapacity, [parts componentsJoinedByString:@" • "]);
     return 0;
 }
 
