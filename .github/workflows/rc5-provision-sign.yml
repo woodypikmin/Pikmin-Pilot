@@ -22,6 +22,7 @@ jobs:
       JOB_ID: ${{ inputs.job_id }}
       BACKEND_URL: ${{ inputs.backend_url }}
       BACKEND_TOKEN: ${{ secrets.PIKMIN_BACKEND_WORKFLOW_TOKEN }}
+      BASELINE_REPO: ${{ vars.PIKMIN_BASELINE_REPO }}
       BASELINE_RELEASE_TAG: ${{ vars.PIKMIN_BASELINE_RELEASE_TAG || 'pikminpilot-11.5.4.17' }}
       BASELINE_IPA_ASSET: ${{ vars.PIKMIN_BASELINE_IPA_ASSET || 'PikminPilot-11.5.4.17.ipa' }}
     steps:
@@ -37,18 +38,22 @@ jobs:
           esac
           test -n "$BACKEND_TOKEN"
 
-      - name: Download known-good 11.5.4.17 IPA from A repo Release
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Download known-good 11.5.4.17 IPA from public B repo Release
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p work
-          echo "Release tag: $BASELINE_RELEASE_TAG"
-          echo "IPA asset:   $BASELINE_IPA_ASSET"
-          gh release download "$BASELINE_RELEASE_TAG" --pattern "$BASELINE_IPA_ASSET" --dir work --clobber
-          mv "work/$BASELINE_IPA_ASSET" work/baseline.ipa
+          test -n "$BASELINE_REPO" || { echo 'PIKMIN_BASELINE_REPO variable is required, e.g. OWNER/Windows-setup' >&2; exit 2; }
+          echo "Release repo: $BASELINE_REPO"
+          echo "Release tag:  $BASELINE_RELEASE_TAG"
+          echo "IPA asset:    $BASELINE_IPA_ASSET"
+          URL="https://github.com/${BASELINE_REPO}/releases/download/${BASELINE_RELEASE_TAG}/${BASELINE_IPA_ASSET}"
+          echo "Download URL: $URL"
+          curl --fail --location --show-error --silent \
+            --retry 4 --retry-all-errors \
+            "$URL" -o work/baseline.ipa
           test -s work/baseline.ipa
+          echo "Downloaded bytes: $(stat -f%z work/baseline.ipa)"
           shasum -a 256 work/baseline.ipa
 
       - name: Download App / Tunnel / Runner Development profiles
