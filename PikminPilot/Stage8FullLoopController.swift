@@ -30,7 +30,7 @@ final class Stage8FullLoopController: ObservableObject {
     private var backgroundGeneration: UInt64 = 0
     private var renewalInProgress = false
     private var criticalTailInProgress = false
-    // Stage 11.5.4.16: once a dispatch has left the expedition list, Pilot is
+    // Stage 11.5.4.17: once a dispatch has left the expedition list, Pilot is
     // forbidden from foregrounding itself until Runner has positively closed
     // the carrying green X and hands control back. This prevents a background
     // renewal/checkpoint from stealing foreground before the close tap.
@@ -72,7 +72,7 @@ final class Stage8FullLoopController: ObservableObject {
 
         beginBackgroundWindow(label: "initial")
         let goal = self.targetDispatches.map(String.init) ?? "∞"
-        emit("STAGE 11.5.4.16 PILOT RUN START • baseline=11.5.3 • automation-core=10.3.1 • transportHost=\(host):49152 • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • Stage 8.2.2 stable loop core • WDA=OFF")
+        emit("STAGE 11.5.4.17 PILOT RUN START • baseline=11.5.3 • automation-core=10.3.1 • transportHost=\(host):49152 • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • Stage 8.2.2 stable loop core • WDA=OFF")
 
         worker = Task { [weak self] in
             guard let self else { return }
@@ -80,7 +80,7 @@ final class Stage8FullLoopController: ObservableObject {
         }
     }
 
-    // Stage 11.5.4.16: run the same verified 10.3.1 automation core on an
+    // Stage 11.5.4.17: run the same verified 10.3.1 automation core on an
     // already-established persistent RSD session. This is the cellular escape
     // path: no operation below is allowed to reconnect to RemotePairing :49152.
     func startPersistent(
@@ -114,7 +114,7 @@ final class Stage8FullLoopController: ObservableObject {
 
         beginBackgroundWindow(label: "persistent-cellular")
         let goal = self.targetDispatches.map(String.init) ?? "∞"
-        emit("STAGE 11.5.4.16 PERSISTENT CELLULAR RUN START • automation-core=10.3.1 • transport=\(transportLabel) • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • RPPairing-reconnect=DISABLED")
+        emit("STAGE 11.5.4.17 PERSISTENT CELLULAR RUN START • automation-core=10.3.1 • transport=\(transportLabel) • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • RPPairing-reconnect=DISABLED")
 
         worker = Task { [weak self] in
             guard let self else { return }
@@ -270,7 +270,7 @@ final class Stage8FullLoopController: ObservableObject {
                 ) else {
                     consecutiveEmptyFullScans += 1
 
-                    // Stage 11.5.4.16 HARD COUNT LATCH: a finite target is a
+                    // Stage 11.5.4.17 HARD COUNT LATCH: a finite target is a
                     // contract, not a best-effort loop. A detector/list refresh
                     // miss is recoverable and MUST NOT end a 5/5 (or N/N) run.
                     // Stay on the same round until an item appears, the user
@@ -480,7 +480,7 @@ final class Stage8FullLoopController: ObservableObject {
         setPhase("前往探險")
 
         if item.kind == .seedling {
-            // Stage 11.5.4.16: seedling artwork can itself be blue, so never use
+            // Stage 11.5.4.17: seedling artwork can itself be blue, so never use
             // blue-pixel geometry to choose the detail-page CTA. OCR the literal
             // CTA text and tap the text centre. This leaves the proven fruit path
             // completely unchanged.
@@ -535,7 +535,7 @@ final class Stage8FullLoopController: ObservableObject {
             try checkCancelled()
         }
 
-        // Stage 11.5.4.16: the detail/OCR transition is now proven, but field logs
+        // Stage 11.5.4.17: the detail/OCR transition is now proven, but field logs
         // showed only ~14-17s of finite background time remained by the time the
         // critical Runner tail began. That is not enough margin for select→GO→X
         // plus Runner→Pilot handoff. Renew only at this verified selection-page
@@ -639,11 +639,10 @@ final class Stage8FullLoopController: ObservableObject {
         try checkCancelled()
 
         let tailElapsed = Date().timeIntervalSince(tailStartedAt)
-        let postTailRemaining = UIApplication.shared.backgroundTimeRemaining
-        if postTailRemaining.isFinite {
+        if let postTailRemaining = finiteBackgroundSeconds() {
             emit(String(format: "ROUND %d • ONE XCTest critical tail completed ✅ • %@→%d→GO→greenX • tail=%.2fs • background=%.1fs", round, pikminType.shortName, pikminCount, tailElapsed, postTailRemaining))
         } else {
-            emit(String(format: "ROUND %d • ONE XCTest critical tail completed ✅ • %@→%d→GO→greenX • tail=%.2fs", round, pikminType.shortName, pikminCount, tailElapsed))
+            emit(String(format: "ROUND %d • ONE XCTest critical tail completed ✅ • %@→%d→GO→greenX • tail=%.2fs • background=%@", round, pikminType.shortName, pikminCount, tailElapsed, backgroundBudgetLabel()))
         }
 
         // Stage 8.2.2 Runner activates Pikmin Pilot after tapping the green X.
@@ -661,11 +660,10 @@ final class Stage8FullLoopController: ObservableObject {
         round: Int
     ) async throws {
         let handoffStartedAt = Date()
-        let handoffStartRemaining = UIApplication.shared.backgroundTimeRemaining
-        if handoffStartRemaining.isFinite {
+        if let handoffStartRemaining = finiteBackgroundSeconds() {
             emit(String(format: "ROUND %d • HANDOFF WAIT begin • appState=%@ • background=%.1fs", round, appStateLabel(), handoffStartRemaining))
         } else {
-            emit("ROUND \(round) • HANDOFF WAIT begin • appState=\(appStateLabel())")
+            emit("ROUND \(round) • HANDOFF WAIT begin • appState=\(appStateLabel()) • background=\(backgroundBudgetLabel())")
         }
 
         var active = UIApplication.shared.applicationState == .active
@@ -680,23 +678,22 @@ final class Stage8FullLoopController: ObservableObject {
         }
 
         let handoffElapsed = Date().timeIntervalSince(handoffStartedAt)
-        let handoffEndRemaining = UIApplication.shared.backgroundTimeRemaining
         guard active else {
-            if handoffEndRemaining.isFinite {
+            if let handoffEndRemaining = finiteBackgroundSeconds() {
                 emit(String(format: "ROUND %d • HANDOFF WAIT failed ❌ • wait=%.2fs • appState=%@ • background=%.1fs", round, handoffElapsed, appStateLabel(), handoffEndRemaining))
             } else {
-                emit(String(format: "ROUND %d • HANDOFF WAIT failed ❌ • wait=%.2fs • appState=%@", round, handoffElapsed, appStateLabel()))
+                emit(String(format: "ROUND %d • HANDOFF WAIT failed ❌ • wait=%.2fs • appState=%@ • background=%@", round, handoffElapsed, appStateLabel(), backgroundBudgetLabel()))
             }
             throw LoopError("phase=runner-handoff • verified Runner did not return Pilot foreground; leaving Pikmin Bloom visible for diagnosis")
         }
 
-        if handoffEndRemaining.isFinite {
+        if let handoffEndRemaining = finiteBackgroundSeconds() {
             emit(String(format: "ROUND %d • HANDOFF ACTIVE ✅ • wait=%.2fs • background=%.1fs", round, handoffElapsed, handoffEndRemaining))
         } else {
-            emit(String(format: "ROUND %d • HANDOFF ACTIVE ✅ • wait=%.2fs", round, handoffElapsed))
+            emit(String(format: "ROUND %d • HANDOFF ACTIVE ✅ • wait=%.2fs • background=%@", round, handoffElapsed, backgroundBudgetLabel()))
         }
 
-        // Stage 11.5.4.16 SECOND ACK: Runner 1153-xfix remains untouched.
+        // Stage 11.5.4.17 SECOND ACK: Runner 1153-xfix remains untouched.
         // Do not trust a single "X disappeared" observation as the final truth:
         // a transient detector miss inside Runner can otherwise foreground Pilot
         // even though the carrying X is still visible. Keep the foreground lock
@@ -712,10 +709,11 @@ final class Stage8FullLoopController: ObservableObject {
         beginBackgroundWindow(label: "post-tail-verify-r\(round)")
         backgroundExpiredDuringCriticalTail = false
 
-        let reactivate = await engine.runXCTestActivateOnly()
-        guard reactivate.ok else {
-            throw LoopError("phase=runner-handoff-reactivate-pikmin • \(reactivate.message)")
-        }
+        try await reactivatePikminWithRecovery(
+            engine: engine,
+            stage: "runner-handoff-reactivate-pikmin",
+            round: round
+        )
 
         try await verifyCarryingCloseAfterRunnerHandoff(engine: engine, round: round)
 
@@ -846,7 +844,7 @@ final class Stage8FullLoopController: ObservableObject {
         return nil
     }
 
-    // MARK: - Stage 11.5.4.16 seedling detail OCR gate
+    // MARK: - Stage 11.5.4.17 seedling detail OCR gate
 
     private func normalizedAutomationText(_ text: String) -> String {
         text
@@ -977,25 +975,40 @@ final class Stage8FullLoopController: ObservableObject {
         engine: IDeviceEngine,
         tag: String
     ) async throws -> UIImage {
-        try checkCancelled()
         let safeTag = tag.replacingOccurrences(of: "/", with: "-")
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("PikminPilot-Stage10.3-\(safeTag).png")
-        try? FileManager.default.removeItem(at: url)
+        let maxAttempts = tag.hasPrefix("post-tail-green-x-ack") ? 6 : 3
+        var lastFailure = "unknown screenshot failure"
 
-        let result = await engine.takeScreenshot(outputPath: url.path)
-        try checkCancelled()
-        guard result.ok else {
-            throw LoopError("phase=dvt-screenshot/\(tag) • \(result.message)")
+        for attempt in 1...maxAttempts {
+            try checkCancelled()
+            try? FileManager.default.removeItem(at: url)
+
+            let result = await engine.takeScreenshot(outputPath: url.path)
+            try checkCancelled()
+
+            if result.ok,
+               let data = try? Data(contentsOf: url),
+               let image = UIImage(data: data),
+               image.cgImage != nil {
+                if attempt > 1 {
+                    emit("DVT SCREENSHOT RECOVERED ✅ • tag=\(tag) • attempt=\(attempt)/\(maxAttempts)")
+                }
+                return image
+            }
+
+            lastFailure = result.ok ? "UIKit decode failed" : result.message
+            let transient = isTransientTransportFailure(lastFailure)
+            guard transient, attempt < maxAttempts else {
+                throw LoopError("phase=dvt-screenshot/\(tag) • \(lastFailure)")
+            }
+
+            emit("DVT SCREENSHOT transient failure ⚠️ • tag=\(tag) • attempt=\(attempt)/\(maxAttempts) • retrying fresh channel • \(compactTransportMessage(lastFailure))")
+            await pause(tag.hasPrefix("post-tail-green-x-ack") ? 0.30 : 0.18)
         }
-        guard
-            let data = try? Data(contentsOf: url),
-            let image = UIImage(data: data),
-            image.cgImage != nil
-        else {
-            throw LoopError("phase=dvt-screenshot/\(tag) • UIKit decode failed")
-        }
-        return image
+
+        throw LoopError("phase=dvt-screenshot/\(tag) • \(lastFailure)")
     }
 
     private func tap(
@@ -1088,7 +1101,7 @@ final class Stage8FullLoopController: ObservableObject {
 
     // MARK: - iOS finite-background renewal
 
-    // Stage 11.5.4.16 controlled late renewal. This is intentionally separate
+    // Stage 11.5.4.17 controlled late renewal. This is intentionally separate
     // from ensureBackgroundBudget(): the normal foreground lock remains strict
     // everywhere else. Only a visually verified Pikmin selection page may open
     // this one renewal checkpoint.
@@ -1141,6 +1154,86 @@ final class Stage8FullLoopController: ObservableObject {
         } else {
             emit("ROUND \(round) • PRE-TAIL RENEWED ✅ • selection re-confirmed")
         }
+    }
+
+    // Stage 11.5.4.17: DVT/XCTest channels are short-lived and can
+    // occasionally close between commands even while the persistent RSD
+    // Adapter itself is healthy. BrokenPipe/ConnectionReset/channel timeout are
+    // therefore retried at safe/idempotent boundaries instead of aborting the
+    // entire finite target immediately.
+    private func isTransientTransportFailure(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        let needles = [
+            "brokenpipe",
+            "broken pipe",
+            "connectionreset",
+            "connection reset",
+            "remote server connection closed",
+            "channel recv timeout",
+            "timedout",
+            "timed out",
+            "socket(custom"
+        ]
+        return needles.contains { lower.contains($0) }
+    }
+
+    private func compactTransportMessage(_ text: String) -> String {
+        let oneLine = text
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
+        if oneLine.count <= 180 { return oneLine }
+        return String(oneLine.prefix(177)) + "..."
+    }
+
+    private func finiteBackgroundSeconds() -> Double? {
+        // UIKit returns Double.greatestFiniteMagnitude while the app is active.
+        // `isFinite` alone is therefore not a useful test for a real finite
+        // background window.
+        guard UIApplication.shared.applicationState != .active else { return nil }
+        let value = UIApplication.shared.backgroundTimeRemaining
+        guard value.isFinite, value >= 0, value < 86_400 else { return nil }
+        return value
+    }
+
+    private func backgroundBudgetLabel() -> String {
+        if UIApplication.shared.applicationState == .active {
+            return "foreground/unlimited"
+        }
+        if let value = finiteBackgroundSeconds() {
+            return String(format: "%.1fs", value)
+        }
+        return "unbounded/unknown"
+    }
+
+    private func reactivatePikminWithRecovery(
+        engine: IDeviceEngine,
+        stage: String,
+        round: Int?
+    ) async throws {
+        try checkCancelled()
+
+        let primary = await engine.runXCTestActivateOnly()
+        try checkCancelled()
+        if primary.ok { return }
+
+        guard isTransientTransportFailure(primary.message) else {
+            throw LoopError("phase=\(stage) • \(primary.message)")
+        }
+
+        let prefix = round.map { "ROUND \($0) • " } ?? ""
+        emit("\(prefix)PIKMIN ACTIVATE transient XCTest failure ⚠️ • using AppService foreground fallback • \(compactTransportMessage(primary.message))")
+
+        // AppService launch of an already-running target foregrounds it without
+        // requiring the flaky XCTest dtservicehub channel. The caller re-checks
+        // the exact game page before sending any gesture.
+        let fallback = await engine.launchBundleID("com.nianticlabs.pikmin")
+        try checkCancelled()
+        guard fallback.ok else {
+            throw LoopError("phase=\(stage)-fallback • XCTest activate failed: \(primary.message) • AppService fallback failed: \(fallback.message)")
+        }
+
+        emit("\(prefix)PIKMIN ACTIVATE RECOVERED ✅ • AppService foreground fallback")
+        await pause(0.35)
     }
 
     private func appStateLabel() -> String {
@@ -1211,10 +1304,11 @@ final class Stage8FullLoopController: ObservableObject {
 
         beginBackgroundWindow(label: "renew-\(reason)")
 
-        let reactivate = await engine.runXCTestActivateOnly()
-        guard reactivate.ok else {
-            throw LoopError("phase=background-refresh-pikmin • \(reactivate.message)")
-        }
+        try await reactivatePikminWithRecovery(
+            engine: engine,
+            stage: "background-refresh-pikmin",
+            round: nil
+        )
 
         emit("BACKGROUND renewed ✅ • Pikmin re-activated without relaunch")
         await pause(0.30)
