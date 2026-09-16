@@ -30,7 +30,7 @@ final class Stage8FullLoopController: ObservableObject {
     private var backgroundGeneration: UInt64 = 0
     private var renewalInProgress = false
     private var criticalTailInProgress = false
-    // Stage 11.5.4.17: once a dispatch has left the expedition list, Pilot is
+    // Stage 11.5.4.18: once a dispatch has left the expedition list, Pilot is
     // forbidden from foregrounding itself until Runner has positively closed
     // the carrying green X and hands control back. This prevents a background
     // renewal/checkpoint from stealing foreground before the close tap.
@@ -72,7 +72,7 @@ final class Stage8FullLoopController: ObservableObject {
 
         beginBackgroundWindow(label: "initial")
         let goal = self.targetDispatches.map(String.init) ?? "∞"
-        emit("STAGE 11.5.4.17 PILOT RUN START • baseline=11.5.3 • automation-core=10.3.1 • transportHost=\(host):49152 • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • Stage 8.2.2 stable loop core • WDA=OFF")
+        emit("STAGE 11.5.4.18 PILOT RUN START • baseline=11.5.3 • automation-core=10.3.1 • transportHost=\(host):49152 • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • Stage 8.2.2 stable loop core • WDA=OFF")
 
         worker = Task { [weak self] in
             guard let self else { return }
@@ -80,7 +80,7 @@ final class Stage8FullLoopController: ObservableObject {
         }
     }
 
-    // Stage 11.5.4.17: run the same verified 10.3.1 automation core on an
+    // Stage 11.5.4.18: run the same verified 10.3.1 automation core on an
     // already-established persistent RSD session. This is the cellular escape
     // path: no operation below is allowed to reconnect to RemotePairing :49152.
     func startPersistent(
@@ -114,7 +114,7 @@ final class Stage8FullLoopController: ObservableObject {
 
         beginBackgroundWindow(label: "persistent-cellular")
         let goal = self.targetDispatches.map(String.init) ?? "∞"
-        emit("STAGE 11.5.4.17 PERSISTENT CELLULAR RUN START • automation-core=10.3.1 • transport=\(transportLabel) • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • RPPairing-reconnect=DISABLED")
+        emit("STAGE 11.5.4.18 PERSISTENT CELLULAR RUN START • automation-core=10.3.1 • transport=\(transportLabel) • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • RPPairing-reconnect=DISABLED")
 
         worker = Task { [weak self] in
             guard let self else { return }
@@ -270,7 +270,7 @@ final class Stage8FullLoopController: ObservableObject {
                 ) else {
                     consecutiveEmptyFullScans += 1
 
-                    // Stage 11.5.4.17 HARD COUNT LATCH: a finite target is a
+                    // Stage 11.5.4.18 HARD COUNT LATCH: a finite target is a
                     // contract, not a best-effort loop. A detector/list refresh
                     // miss is recoverable and MUST NOT end a 5/5 (or N/N) run.
                     // Stay on the same round until an item appears, the user
@@ -449,6 +449,10 @@ final class Stage8FullLoopController: ObservableObject {
 
     // MARK: - One complete Stage 5 dispatch
 
+    private var isIPadDevice: Bool {
+        UIDevice.current.userInterfaceIdiom == .pad
+    }
+
     private func runOneDispatch(
         engine: IDeviceEngine,
         round: Int,
@@ -460,10 +464,14 @@ final class Stage8FullLoopController: ObservableObject {
         // Renew only while still on the expedition list, before entering any
         // modal/detail/selection UI. After this point gameplayForegroundLock
         // prevents Pilot from stealing foreground until the green X is closed.
+        // iPad can occasionally spend ~60s inside an XCTest activate during a
+        // renewal. Do not renew early on the expedition list: the later
+        // pre-critical-tail checkpoint is the safer place to refresh. iPhone
+        // keeps the proven 11.5.4.18 threshold unchanged.
         try await ensureBackgroundBudget(
             engine: engine,
             stage: "pre-dispatch-safe-boundary",
-            minimumRemaining: 22.0
+            minimumRemaining: isIPadDevice ? 10.0 : 22.0
         )
         gameplayForegroundLock = true
 
@@ -480,7 +488,7 @@ final class Stage8FullLoopController: ObservableObject {
         setPhase("前往探險")
 
         if item.kind == .seedling {
-            // Stage 11.5.4.17: seedling artwork can itself be blue, so never use
+            // Stage 11.5.4.18: seedling artwork can itself be blue, so never use
             // blue-pixel geometry to choose the detail-page CTA. OCR the literal
             // CTA text and tap the text centre. This leaves the proven fruit path
             // completely unchanged.
@@ -535,7 +543,7 @@ final class Stage8FullLoopController: ObservableObject {
             try checkCancelled()
         }
 
-        // Stage 11.5.4.17: the detail/OCR transition is now proven, but field logs
+        // Stage 11.5.4.18: the detail/OCR transition is now proven, but field logs
         // showed only ~14-17s of finite background time remained by the time the
         // critical Runner tail began. That is not enough margin for select→GO→X
         // plus Runner→Pilot handoff. Renew only at this verified selection-page
@@ -693,7 +701,7 @@ final class Stage8FullLoopController: ObservableObject {
             emit(String(format: "ROUND %d • HANDOFF ACTIVE ✅ • wait=%.2fs • background=%@", round, handoffElapsed, backgroundBudgetLabel()))
         }
 
-        // Stage 11.5.4.17 SECOND ACK: Runner 1153-xfix remains untouched.
+        // Stage 11.5.4.18 SECOND ACK: Runner 1153-xfix remains untouched.
         // Do not trust a single "X disappeared" observation as the final truth:
         // a transient detector miss inside Runner can otherwise foreground Pilot
         // even though the carrying X is still visible. Keep the foreground lock
@@ -844,7 +852,7 @@ final class Stage8FullLoopController: ObservableObject {
         return nil
     }
 
-    // MARK: - Stage 11.5.4.17 seedling detail OCR gate
+    // MARK: - Stage 11.5.4.18 seedling detail OCR gate
 
     private func normalizedAutomationText(_ text: String) -> String {
         text
@@ -1101,7 +1109,7 @@ final class Stage8FullLoopController: ObservableObject {
 
     // MARK: - iOS finite-background renewal
 
-    // Stage 11.5.4.17 controlled late renewal. This is intentionally separate
+    // Stage 11.5.4.18 controlled late renewal. This is intentionally separate
     // from ensureBackgroundBudget(): the normal foreground lock remains strict
     // everywhere else. Only a visually verified Pikmin selection page may open
     // this one renewal checkpoint.
@@ -1156,7 +1164,7 @@ final class Stage8FullLoopController: ObservableObject {
         }
     }
 
-    // Stage 11.5.4.17: DVT/XCTest channels are short-lived and can
+    // Stage 11.5.4.18: DVT/XCTest channels are short-lived and can
     // occasionally close between commands even while the persistent RSD
     // Adapter itself is healthy. BrokenPipe/ConnectionReset/channel timeout are
     // therefore retried at safe/idempotent boundaries instead of aborting the
@@ -1170,6 +1178,7 @@ final class Stage8FullLoopController: ObservableObject {
             "connection reset",
             "remote server connection closed",
             "channel recv timeout",
+            "xctesttimeout",
             "timedout",
             "timed out",
             "socket(custom"
@@ -1212,6 +1221,35 @@ final class Stage8FullLoopController: ObservableObject {
     ) async throws {
         try checkCancelled()
 
+        let prefix = round.map { "ROUND \($0) • " } ?? ""
+
+        // Stage 11.5.4.18 iPad foreground recovery:
+        // On iPadOS the XCTest activate-only path can occasionally block for
+        // nearly its full ~60s timeout. For foreground restoration we do not
+        // need a new XCTest command; AppService can foreground the already
+        // running Pikmin process. Prefer that on iPad and keep the proven
+        // XCTest-first path on iPhone.
+        if isIPadDevice {
+            emit("\(prefix)IPAD FOREGROUND • AppService-first • stage=\(stage)")
+            let appService = await engine.launchBundleID("com.nianticlabs.pikmin")
+            try checkCancelled()
+            if appService.ok {
+                emit("\(prefix)IPAD FOREGROUND ✅ • AppService foregrounded Pikmin")
+                await pause(0.25)
+                return
+            }
+
+            emit("\(prefix)IPAD FOREGROUND AppService miss ⚠️ • falling back to XCTest activate • \(compactTransportMessage(appService.message))")
+            let fallbackXCTest = await engine.runXCTestActivateOnly()
+            try checkCancelled()
+            guard fallbackXCTest.ok else {
+                throw LoopError("phase=\(stage) • AppService failed: \(appService.message) • XCTest fallback failed: \(fallbackXCTest.message)")
+            }
+            emit("\(prefix)IPAD FOREGROUND RECOVERED ✅ • XCTest fallback")
+            await pause(0.25)
+            return
+        }
+
         let primary = await engine.runXCTestActivateOnly()
         try checkCancelled()
         if primary.ok { return }
@@ -1220,12 +1258,8 @@ final class Stage8FullLoopController: ObservableObject {
             throw LoopError("phase=\(stage) • \(primary.message)")
         }
 
-        let prefix = round.map { "ROUND \($0) • " } ?? ""
         emit("\(prefix)PIKMIN ACTIVATE transient XCTest failure ⚠️ • using AppService foreground fallback • \(compactTransportMessage(primary.message))")
 
-        // AppService launch of an already-running target foregrounds it without
-        // requiring the flaky XCTest dtservicehub channel. The caller re-checks
-        // the exact game page before sending any gesture.
         let fallback = await engine.launchBundleID("com.nianticlabs.pikmin")
         try checkCancelled()
         guard fallback.ok else {

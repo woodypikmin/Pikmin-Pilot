@@ -4,7 +4,7 @@ CURRENT VERIFIED SIGNING MODEL
 - Host app: registered-device Apple Development profile
 - PacketTunnel extension: matching registered-device profile with packet-tunnel-provider entitlement
 - XCUITest Runner: matching registered-device profile
-- Host/Tunnel CURRENT_PROJECT_VERSION: 1157
+- Host/Tunnel CURRENT_PROJECT_VERSION: 1158
 - Runner CURRENT_PROJECT_VERSION: 1153
 - Runner revision: 1153-xfix
 
