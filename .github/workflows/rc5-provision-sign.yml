@@ -95,6 +95,17 @@ jobs:
           echo "SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
           echo "Using identity: $IDENTITY"
 
+      - name: Verify RC5 signing script revision and Bash syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          SCRIPT=CloudProvisioning/scripts/rc5_resign_ipa.sh
+          test -s "$SCRIPT"
+          grep -F "RC5_SIGN_SCRIPT_REVISION='2026-09-16.4-nounset-hardened'" "$SCRIPT"
+          grep -F 'local decoded="$WORK/profile-${label}.plist"' "$SCRIPT" >/dev/null
+          bash -n "$SCRIPT"
+          echo "Signing script SHA256: $(shasum -a 256 "$SCRIPT" | awk '{print $1}')"
+
       - name: Re-sign same 11.5.4.17 payload while preserving target entitlements
         env:
           INPUT_IPA: ${{ github.workspace }}/work/baseline.ipa
@@ -105,12 +116,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          echo '--- invoking hardened RC5 signer ---'
+          set +e
           bash CloudProvisioning/scripts/rc5_resign_ipa.sh
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            echo "RC5 signer failed (exit=$rc). The signer log above contains the exact failing line/command." >&2
+            exit "$rc"
+          fi
           echo '--- output handoff check ---'
+          IPA="${{ github.workspace }}/work/PikminPilot.ipa"
           ls -lah "${{ github.workspace }}/work"
-          test -s "${{ github.workspace }}/work/PikminPilot.ipa"
-          echo "Signed IPA bytes: $(stat -f%z "${{ github.workspace }}/work/PikminPilot.ipa")"
-          shasum -a 256 "${{ github.workspace }}/work/PikminPilot.ipa"
+          test -s "$IPA" || { echo "Signed IPA missing after successful signer: $IPA" >&2; exit 1; }
+          echo "Signed IPA bytes: $(stat -f%z "$IPA")"
+          shasum -a 256 "$IPA"
 
       - name: Upload signed IPA to provisioning backend
         shell: bash
