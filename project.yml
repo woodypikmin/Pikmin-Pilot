@@ -54,7 +54,7 @@ targets:
         - -lc++
         - -lz
         CODE_SIGN_STYLE: Manual
-        CURRENT_PROJECT_VERSION: '1153'
+        CURRENT_PROJECT_VERSION: '1154'
         MARKETING_VERSION: '11.5.4.14'
     scheme:
       testTargets:
@@ -79,7 +79,7 @@ targets:
         SKIP_INSTALL: YES
         APPLICATION_EXTENSION_API_ONLY: YES
         CODE_SIGN_STYLE: Manual
-        CURRENT_PROJECT_VERSION: '1153'
+        CURRENT_PROJECT_VERSION: '1154'
         MARKETING_VERSION: '11.5.4.14'
   PikminPilotRunnerUITests:
     type: bundle.ui-testing
