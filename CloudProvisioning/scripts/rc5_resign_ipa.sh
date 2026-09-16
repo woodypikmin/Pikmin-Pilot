@@ -1,8 +1,20 @@
 #!/bin/bash
-set -euo pipefail
+set -Eeuo pipefail
+
+RC5_SIGN_SCRIPT_REVISION='2026-09-16.4-nounset-hardened'
 
 log() { printf '[RC5-SIGN] %s\n' "$*"; }
 die() { printf '[RC5-SIGN] ERROR: %s\n' "$*" >&2; exit 1; }
+
+on_err() {
+  local rc=$?
+  local line="${BASH_LINENO[0]:-unknown}"
+  local cmd="${BASH_COMMAND:-unknown}"
+  trap - ERR
+  printf '[RC5-SIGN] ERROR: command failed (exit=%s line=%s): %s\n' "$rc" "$line" "$cmd" >&2
+  exit "$rc"
+}
+trap on_err ERR
 
 : "${INPUT_IPA:?INPUT_IPA is required}"
 : "${OUTPUT_IPA:?OUTPUT_IPA is required}"
@@ -17,12 +29,28 @@ RUNNER_ID='com.woodypikmin.pikminpilot.runner.xctrunner'
 EMBEDDED_RUNNER_NAME='PikminPilotEmbeddedRunner.ipa'
 EMBEDDED_RUNNER_METADATA_NAME='PikminPilotEmbeddedRunnerMetadata.plist'
 
+log "Script revision: $RC5_SIGN_SCRIPT_REVISION"
+
 for f in "$INPUT_IPA" "$PROFILE_APP" "$PROFILE_TUNNEL" "$PROFILE_RUNNER"; do
   [[ -s "$f" ]] || die "missing/empty input: $f"
 done
 
+for tool in /usr/bin/codesign /usr/bin/security /usr/bin/ditto /usr/bin/zip /usr/bin/shasum /usr/libexec/PlistBuddy; do
+  [[ -x "$tool" ]] || die "required macOS tool missing: $tool"
+done
+
+mkdir -p "$(dirname "$OUTPUT_IPA")"
+[[ -w "$(dirname "$OUTPUT_IPA")" ]] || die "output directory is not writable: $(dirname "$OUTPUT_IPA")"
+
 log "Input IPA: $(basename "$INPUT_IPA") ($(stat -f%z "$INPUT_IPA") bytes)"
+log "Requested output: $OUTPUT_IPA"
 log "Signing identity: $SIGNING_IDENTITY"
+
+if ! /usr/bin/security find-identity -v -p codesigning | grep -Fq "$SIGNING_IDENTITY"; then
+  /usr/bin/security find-identity -v -p codesigning || true
+  die "signing identity is not visible to codesign: $SIGNING_IDENTITY"
+fi
+log 'Signing identity is available.'
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -31,11 +59,15 @@ RUNNER_WORK="$WORK/runner"
 mkdir -p "$OUTER" "$RUNNER_WORK"
 
 bundle_id_from_plist() {
-  /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$1" 2>/dev/null || true
+  local plist="$1"
+  /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist" 2>/dev/null || true
 }
 
 find_bundle_exact_under() {
-  local root="$1" wanted="$2" plist bid
+  local root="$1"
+  local wanted="$2"
+  local plist=''
+  local bid=''
   while IFS= read -r -d '' plist; do
     bid="$(bundle_id_from_plist "$plist")"
     if [[ "$bid" == "$wanted" ]]; then
@@ -47,22 +79,26 @@ find_bundle_exact_under() {
 }
 
 extract_entitlements() {
-  local target="$1" out="$2"
+  local target="$1"
+  local out="$2"
   /usr/bin/codesign -d --entitlements :- "$target" > "$out" 2>/dev/null || true
   grep -q '<plist' "$out" || die "Unable to extract entitlements from $target"
 }
 
 sign_plain() {
-  /usr/bin/codesign --force --sign "$SIGNING_IDENTITY" --timestamp=none "$1"
+  local target="$1"
+  /usr/bin/codesign --force --sign "$SIGNING_IDENTITY" --timestamp=none "$target"
 }
 
 sign_with_entitlements() {
-  local target="$1" ent="$2"
+  local target="$1"
+  local ent="$2"
   /usr/bin/codesign --force --sign "$SIGNING_IDENTITY" --timestamp=none --entitlements "$ent" "$target"
 }
 
 resign_preserving() {
-  local p="$1" ent="$WORK/preserve.$RANDOM.$RANDOM.plist"
+  local p="$1"
+  local ent="$WORK/preserve.$RANDOM.$RANDOM.plist"
   /usr/bin/codesign -d --entitlements :- "$p" > "$ent" 2>/dev/null || true
   if grep -q '<plist' "$ent"; then
     sign_with_entitlements "$p" "$ent"
@@ -73,31 +109,68 @@ resign_preserving() {
 }
 
 profile_decode() {
-  local profile="$1" out="$2"
+  local profile="$1"
+  local out="$2"
   /usr/bin/security cms -D -i "$profile" > "$out" || die "Cannot decode provisioning profile: $profile"
 }
 
 profile_check() {
-  local label="$1" profile="$2" wanted="$3" decoded="$WORK/profile-$label.plist" appid
+  # IMPORTANT: declarations are deliberately split. With `set -u`, Bash expands
+  # RHS expressions before assignments in a single `local` command.
+  local label="$1"
+  local profile="$2"
+  local wanted="$3"
+  local decoded="$WORK/profile-${label}.plist"
+  local appid=''
+  local team=''
+  local uuid=''
+  local expiry=''
+  local expected=''
+
   profile_decode "$profile" "$decoded"
   appid="$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:application-identifier' "$decoded" 2>/dev/null || true)"
+  team="$(/usr/libexec/PlistBuddy -c 'Print :TeamIdentifier:0' "$decoded" 2>/dev/null || true)"
+  uuid="$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$decoded" 2>/dev/null || true)"
+  expiry="$(/usr/libexec/PlistBuddy -c 'Print :ExpirationDate' "$decoded" 2>/dev/null || true)"
+
   [[ -n "$appid" ]] || die "$label profile has no application-identifier entitlement"
-  case "$appid" in
-    *.$wanted) ;;
-    *) die "$label profile application-identifier '$appid' does not match '$wanted'" ;;
-  esac
-  log "$label profile OK: $appid"
+  [[ -n "$team" ]] || die "$label profile has no TeamIdentifier"
+  expected="${team}.${wanted}"
+  [[ "$appid" == "$expected" ]] || die "$label profile application-identifier '$appid' != expected '$expected'"
+  log "$label profile OK: appid=$appid uuid=${uuid:-unknown} expires=${expiry:-unknown}"
 }
 
-# ---------- Validate generated profiles first ----------
+entitlements_check_identity() {
+  local label="$1"
+  local entitlements="$2"
+  local profile="$3"
+  local wanted="$4"
+  local decoded="$WORK/profile-ent-${label}.plist"
+  local old_appid=''
+  local new_appid=''
+
+  old_appid="$(/usr/libexec/PlistBuddy -c 'Print :application-identifier' "$entitlements" 2>/dev/null || true)"
+  profile_decode "$profile" "$decoded"
+  new_appid="$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:application-identifier' "$decoded" 2>/dev/null || true)"
+
+  [[ -n "$new_appid" ]] || die "$label new profile has no application-identifier"
+  case "$new_appid" in
+    *".$wanted") ;;
+    *) die "$label new profile application-identifier '$new_appid' does not target '$wanted'" ;;
+  esac
+  if [[ -n "$old_appid" && "$old_appid" != "$new_appid" ]]; then
+    die "$label preserved entitlements use '$old_appid' but new profile requires '$new_appid'; refusing to produce a mismatched signature"
+  fi
+  log "$label preserved entitlement identity matches new profile: $new_appid"
+}
+
 log 'Validating generated provisioning profiles...'
 profile_check app "$PROFILE_APP" "$APP_ID"
 profile_check tunnel "$PROFILE_TUNNEL" "$TUNNEL_ID"
 profile_check runner "$PROFILE_RUNNER" "$RUNNER_ID"
 
-# ---------- Outer host IPA ----------
 log 'Extracting outer Pikmin Pilot IPA...'
-/usr/bin/ditto -x -k "$INPUT_IPA" "$OUTER" || die 'ditto failed to extract outer IPA'
+/usr/bin/ditto -x -k "$INPUT_IPA" "$OUTER"
 ROOT_APP="$(find "$OUTER/Payload" -maxdepth 1 -type d -name '*.app' -print -quit 2>/dev/null || true)"
 [[ -n "$ROOT_APP" ]] || die 'No Payload/*.app found in baseline IPA'
 log "Root payload app: $ROOT_APP"
@@ -109,7 +182,6 @@ TUNNEL_PATH="$(find_bundle_exact_under "$ROOT_APP" "$TUNNEL_ID" || true)"
 log "Host App: $APP_PATH"
 log "Tunnel:   $TUNNEL_PATH"
 
-# The known-good 11.5.4.17 host stores 1153-xfix Runner as a nested IPA resource.
 EMBEDDED_RUNNER_IPA="$(find "$ROOT_APP" -type f -name "$EMBEDDED_RUNNER_NAME" -print -quit 2>/dev/null || true)"
 if [[ -z "$EMBEDDED_RUNNER_IPA" ]]; then
   log 'IPA resources found under host app:'
@@ -123,10 +195,11 @@ TUNNEL_ENT="$WORK/tunnel.entitlements.plist"
 log 'Extracting known-good host/tunnel entitlements...'
 extract_entitlements "$APP_PATH" "$APP_ENT"
 extract_entitlements "$TUNNEL_PATH" "$TUNNEL_ENT"
+entitlements_check_identity app "$APP_ENT" "$PROFILE_APP" "$APP_ID"
+entitlements_check_identity tunnel "$TUNNEL_ENT" "$PROFILE_TUNNEL" "$TUNNEL_ID"
 
-# ---------- Nested 1153-xfix Runner IPA ----------
 log 'Extracting embedded 1153-xfix Runner IPA...'
-/usr/bin/ditto -x -k "$EMBEDDED_RUNNER_IPA" "$RUNNER_WORK" || die 'ditto failed to extract embedded Runner IPA'
+/usr/bin/ditto -x -k "$EMBEDDED_RUNNER_IPA" "$RUNNER_WORK"
 RUNNER_PATH="$(find_bundle_exact_under "$RUNNER_WORK" "$RUNNER_ID" || true)"
 if [[ -z "$RUNNER_PATH" ]]; then
   log 'Bundle identifiers found in embedded Runner IPA:'
@@ -141,9 +214,8 @@ log "1153-xfix Runner: $RUNNER_PATH"
 RUNNER_ENT="$WORK/runner.entitlements.plist"
 log 'Extracting exact entitlements from known-good 1153-xfix Runner...'
 extract_entitlements "$RUNNER_PATH" "$RUNNER_ENT"
+entitlements_check_identity runner "$RUNNER_ENT" "$PROFILE_RUNNER" "$RUNNER_ID"
 
-# Replace only the Runner app's provisioning profile. Nested xctest/frameworks keep
-# their payload/entitlements and are re-signed with the same Development identity.
 cp "$PROFILE_RUNNER" "$RUNNER_PATH/embedded.mobileprovision"
 
 log 'Re-signing Runner dylibs (deepest first)...'
@@ -167,10 +239,9 @@ done < <(find "$RUNNER_PATH" -type d \( -name '*.xctest' -o -name '*.appex' -o -
 
 log 'Signing 1153-xfix Runner with preserved entitlements + NEW Runner profile...'
 sign_with_entitlements "$RUNNER_PATH" "$RUNNER_ENT"
-/usr/bin/codesign --verify --strict --verbose=2 "$RUNNER_PATH" || die 'Runner codesign verification failed'
+/usr/bin/codesign --verify --strict --verbose=2 "$RUNNER_PATH"
 [[ "$(bundle_id_from_plist "$RUNNER_PATH/Info.plist")" == "$RUNNER_ID" ]] || die 'Runner bundle id changed unexpectedly'
 
-# Repack the nested IPA back into the exact host-app resource location.
 rm -f "$EMBEDDED_RUNNER_IPA"
 log 'Packing refreshed embedded Runner IPA back into host app...'
 (
@@ -180,8 +251,6 @@ log 'Packing refreshed embedded Runner IPA back into host app...'
 [[ -s "$EMBEDDED_RUNNER_IPA" ]] || die 'Refreshed embedded Runner IPA was not created'
 log "Refreshed embedded Runner IPA: $(stat -f%z "$EMBEDDED_RUNNER_IPA") bytes"
 
-# Refresh display metadata if this resource exists. Failure here is non-fatal;
-# it is UI metadata only and does not affect provisioning/signature validity.
 RUNNER_META="$(find "$ROOT_APP" -type f -name "$EMBEDDED_RUNNER_METADATA_NAME" -print -quit 2>/dev/null || true)"
 if [[ -n "$RUNNER_META" ]]; then
   RUNNER_PROFILE_DECODED="$WORK/profile-runner-meta.plist"
@@ -189,14 +258,14 @@ if [[ -n "$RUNNER_META" ]]; then
   TEAM_ID="$(/usr/libexec/PlistBuddy -c 'Print :TeamIdentifier:0' "$RUNNER_PROFILE_DECODED" 2>/dev/null || true)"
   EXPIRATION="$(/usr/libexec/PlistBuddy -c 'Print :ExpirationDate' "$RUNNER_PROFILE_DECODED" 2>/dev/null || true)"
   log "Embedded Runner metadata resource found: $RUNNER_META"
-  [[ -n "$TEAM_ID" ]] && /usr/libexec/PlistBuddy -c "Set :TeamIdentifier $TEAM_ID" "$RUNNER_META" >/dev/null 2>&1 || true
-  # PlistBuddy date formatting varies; keep existing ExpirationDate if it cannot be safely replaced.
-  log "Runner profile team=$TEAM_ID expiration=$EXPIRATION"
+  if [[ -n "$TEAM_ID" ]]; then
+    /usr/libexec/PlistBuddy -c "Set :TeamIdentifier $TEAM_ID" "$RUNNER_META" >/dev/null 2>&1 || true
+  fi
+  log "Runner profile team=${TEAM_ID:-unknown} expiration=${EXPIRATION:-unknown}"
 else
   log 'Embedded Runner metadata plist not found; skipping metadata refresh.'
 fi
 
-# ---------- Re-sign outer Tunnel + host App ----------
 cp "$PROFILE_TUNNEL" "$TUNNEL_PATH/embedded.mobileprovision"
 cp "$PROFILE_APP" "$APP_PATH/embedded.mobileprovision"
 
@@ -225,16 +294,13 @@ log 'Signing root App last with preserved known-good entitlements + NEW App prof
 sign_with_entitlements "$APP_PATH" "$APP_ENT"
 
 log 'Verifying outer signatures...'
-/usr/bin/codesign --verify --strict --verbose=2 "$TUNNEL_PATH" || die 'Tunnel codesign verification failed'
-/usr/bin/codesign --verify --strict --verbose=2 "$APP_PATH" || die 'App codesign verification failed'
+/usr/bin/codesign --verify --strict --verbose=2 "$TUNNEL_PATH"
+/usr/bin/codesign --verify --strict --verbose=2 "$APP_PATH"
 [[ "$(bundle_id_from_plist "$APP_PATH/Info.plist")" == "$APP_ID" ]] || die 'App bundle id changed unexpectedly'
 [[ "$(bundle_id_from_plist "$TUNNEL_PATH/Info.plist")" == "$TUNNEL_ID" ]] || die 'Tunnel bundle id changed unexpectedly'
 
-# Build to a private temporary path first, then atomically copy to OUTPUT_IPA.
-# This avoids any cwd/path ambiguity while zip is running inside $OUTER.
 FINAL_TMP="$WORK/PikminPilot.final.ipa"
 rm -f "$FINAL_TMP" "$OUTPUT_IPA"
-mkdir -p "$(dirname "$OUTPUT_IPA")"
 log 'Packing final signed Pikmin Pilot IPA...'
 (
   cd "$OUTER"
@@ -244,4 +310,5 @@ log 'Packing final signed Pikmin Pilot IPA...'
 cp -f "$FINAL_TMP" "$OUTPUT_IPA"
 [[ -s "$OUTPUT_IPA" ]] || die "Output IPA was not created at requested path: $OUTPUT_IPA"
 log "Created: $OUTPUT_IPA ($(stat -f%z "$OUTPUT_IPA") bytes)"
-log "SHA256: $(shasum -a 256 "$OUTPUT_IPA" | awk '{print $1}')"
+log "SHA256: $(/usr/bin/shasum -a 256 "$OUTPUT_IPA" | awk '{print $1}')"
+log 'SUCCESS: re-sign completed and output handoff is ready.'
