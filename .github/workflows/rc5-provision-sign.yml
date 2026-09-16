@@ -1,0 +1,127 @@
+name: RC5 Provision + Re-sign Pikmin Pilot
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:
+        description: Cloud provisioning job id
+        required: true
+        type: string
+      backend_url:
+        description: HTTPS callback URL for this provisioning job
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  sign:
+    runs-on: macos-15
+    env:
+      JOB_ID: ${{ inputs.job_id }}
+      BACKEND_URL: ${{ inputs.backend_url }}
+      BACKEND_TOKEN: ${{ secrets.PIKMIN_BACKEND_WORKFLOW_TOKEN }}
+      BASELINE_RELEASE_TAG: ${{ vars.PIKMIN_BASELINE_RELEASE_TAG || 'pikminpilot-11.5.4.17' }}
+      BASELINE_IPA_ASSET: ${{ vars.PIKMIN_BASELINE_IPA_ASSET || 'PikminPilot-11.5.4.17.ipa' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate callback URL
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$BACKEND_URL" in
+            https://*) ;;
+            *) echo "backend_url must be HTTPS" >&2; exit 2 ;;
+          esac
+          test -n "$BACKEND_TOKEN"
+
+      - name: Download known-good 11.5.4.17 IPA from A repo Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work
+          echo "Release tag: $BASELINE_RELEASE_TAG"
+          echo "IPA asset:   $BASELINE_IPA_ASSET"
+          gh release download "$BASELINE_RELEASE_TAG" --pattern "$BASELINE_IPA_ASSET" --dir work --clobber
+          mv "work/$BASELINE_IPA_ASSET" work/baseline.ipa
+          test -s work/baseline.ipa
+          shasum -a 256 work/baseline.ipa
+
+      - name: Download App / Tunnel / Runner Development profiles
+        shell: bash
+        run: |
+          set -euo pipefail
+          for label in app tunnel runner; do
+            curl --fail --show-error --silent \
+              --retry 4 --retry-all-errors \
+              -H "Authorization: Bearer $BACKEND_TOKEN" \
+              "$BACKEND_URL/internal/jobs/$JOB_ID/profiles/$label" \
+              -o "work/$label.mobileprovision"
+            test -s "work/$label.mobileprovision"
+          done
+
+      - name: Import existing Apple Development P12 into temporary keychain
+        env:
+          P12_B64: ${{ secrets.APPLE_DEV_P12_B64 }}
+          P12_PASSWORD: ${{ secrets.APPLE_DEV_P12_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$P12_B64"
+          python3 - <<'PY'
+          import base64, os
+          raw = ''.join(os.environ['P12_B64'].split())
+          open('work/signing.p12', 'wb').write(base64.b64decode(raw, validate=True))
+          PY
+          KEYCHAIN="$RUNNER_TEMP/pikminpilot-rc5.keychain-db"
+          KEYCHAIN_PASS="$(openssl rand -hex 24)"
+          security create-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN"
+          security import work/signing.p12 -k "$KEYCHAIN" -P "$P12_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASS" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN"
+          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN" | sed -n '1s/.*"\(.*\)".*/\1/p')"
+          test -n "$IDENTITY"
+          echo "SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+          echo "Using identity: $IDENTITY"
+
+      - name: Re-sign same 11.5.4.17 payload while preserving target entitlements
+        env:
+          INPUT_IPA: ${{ github.workspace }}/work/baseline.ipa
+          OUTPUT_IPA: ${{ github.workspace }}/work/PikminPilot.ipa
+          PROFILE_APP: ${{ github.workspace }}/work/app.mobileprovision
+          PROFILE_TUNNEL: ${{ github.workspace }}/work/tunnel.mobileprovision
+          PROFILE_RUNNER: ${{ github.workspace }}/work/runner.mobileprovision
+        shell: bash
+        run: bash CloudProvisioning/scripts/rc5_resign_ipa.sh
+
+      - name: Upload signed IPA to provisioning backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          SHA="$(shasum -a 256 work/PikminPilot.ipa | awk '{print $1}')"
+          curl --fail --show-error --silent \
+            --retry 4 --retry-all-errors \
+            -X PUT \
+            -H "Authorization: Bearer $BACKEND_TOKEN" \
+            -H "X-IPA-SHA256: $SHA" \
+            -H 'Content-Type: application/octet-stream' \
+            --data-binary @work/PikminPilot.ipa \
+            "$BACKEND_URL/internal/jobs/$JOB_ID/result"
+          echo "Uploaded SHA256=$SHA"
+
+      - name: Report failure to backend
+        if: failure()
+        shell: bash
+        run: |
+          curl --show-error --silent \
+            -X POST \
+            -H "Authorization: Bearer $BACKEND_TOKEN" \
+            -H 'Content-Type: application/json' \
+            --data '{"message":"A repo RC5 signing workflow failed; inspect the GitHub Actions run."}' \
+            "$BACKEND_URL/internal/jobs/$JOB_ID/failed" || true
