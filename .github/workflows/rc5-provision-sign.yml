@@ -1,4 +1,4 @@
-name: RC5 Provision + Re-sign Pikmin Pilot
+name: RC6 Dynamic Provision + Re-sign Pikmin Pilot
 
 on:
   workflow_dispatch:
@@ -9,6 +9,22 @@ on:
         type: string
       backend_url:
         description: HTTPS callback URL for this provisioning job
+        required: true
+        type: string
+      app_version:
+        description: App version snapshotted by backend release.json
+        required: true
+        type: string
+      baseline_repo:
+        description: Public B repo containing the known-good IPA release
+        required: true
+        type: string
+      baseline_release_tag:
+        description: Release tag containing the known-good IPA
+        required: true
+        type: string
+      baseline_ipa_asset:
+        description: Exact IPA asset filename
         required: true
         type: string
 
@@ -22,13 +38,14 @@ jobs:
       JOB_ID: ${{ inputs.job_id }}
       BACKEND_URL: ${{ inputs.backend_url }}
       BACKEND_TOKEN: ${{ secrets.PIKMIN_BACKEND_WORKFLOW_TOKEN }}
-      BASELINE_REPO: ${{ vars.PIKMIN_BASELINE_REPO }}
-      BASELINE_RELEASE_TAG: ${{ vars.PIKMIN_BASELINE_RELEASE_TAG || 'pikminpilot-11.5.4.17' }}
-      BASELINE_IPA_ASSET: ${{ vars.PIKMIN_BASELINE_IPA_ASSET || 'PikminPilot-11.5.4.17.ipa' }}
+      APP_VERSION: ${{ inputs.app_version }}
+      BASELINE_REPO: ${{ inputs.baseline_repo }}
+      BASELINE_RELEASE_TAG: ${{ inputs.baseline_release_tag }}
+      BASELINE_IPA_ASSET: ${{ inputs.baseline_ipa_asset }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Validate callback URL
+      - name: Validate dynamic release inputs
         shell: bash
         run: |
           set -euo pipefail
@@ -37,16 +54,20 @@ jobs:
             *) echo "backend_url must be HTTPS" >&2; exit 2 ;;
           esac
           test -n "$BACKEND_TOKEN"
+          [[ "$BASELINE_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "invalid baseline_repo" >&2; exit 2; }
+          [[ "$BASELINE_RELEASE_TAG" =~ ^[A-Za-z0-9._+-]+$ ]] || { echo "invalid baseline_release_tag" >&2; exit 2; }
+          [[ "$BASELINE_IPA_ASSET" == *.ipa ]] || { echo "baseline_ipa_asset must end in .ipa" >&2; exit 2; }
+          case "$BASELINE_IPA_ASSET" in */*) echo "baseline_ipa_asset must be a filename, not a path" >&2; exit 2;; esac
+          echo "App version:  $APP_VERSION"
+          echo "Release repo: $BASELINE_REPO"
+          echo "Release tag:  $BASELINE_RELEASE_TAG"
+          echo "IPA asset:    $BASELINE_IPA_ASSET"
 
-      - name: Download known-good 11.5.4.17 IPA from public B repo Release
+      - name: Download dynamic known-good IPA from public B repo Release
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p work
-          test -n "$BASELINE_REPO" || { echo 'PIKMIN_BASELINE_REPO variable is required, e.g. OWNER/Windows-setup' >&2; exit 2; }
-          echo "Release repo: $BASELINE_REPO"
-          echo "Release tag:  $BASELINE_RELEASE_TAG"
-          echo "IPA asset:    $BASELINE_IPA_ASSET"
           URL="https://github.com/${BASELINE_REPO}/releases/download/${BASELINE_RELEASE_TAG}/${BASELINE_IPA_ASSET}"
           echo "Download URL: $URL"
           curl --fail --location --show-error --silent \
@@ -82,7 +103,7 @@ jobs:
           raw = ''.join(os.environ['P12_B64'].split())
           open('work/signing.p12', 'wb').write(base64.b64decode(raw, validate=True))
           PY
-          KEYCHAIN="$RUNNER_TEMP/pikminpilot-rc5.keychain-db"
+          KEYCHAIN="$RUNNER_TEMP/pikminpilot-rc6.keychain-db"
           KEYCHAIN_PASS="$(openssl rand -hex 24)"
           security create-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN"
           security set-keychain-settings -lut 21600 "$KEYCHAIN"
@@ -95,7 +116,7 @@ jobs:
           echo "SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
           echo "Using identity: $IDENTITY"
 
-      - name: Verify RC5 signing script revision and Bash syntax
+      - name: Verify hardened signing script revision and Bash syntax
         shell: bash
         run: |
           set -euo pipefail
@@ -106,7 +127,7 @@ jobs:
           bash -n "$SCRIPT"
           echo "Signing script SHA256: $(shasum -a 256 "$SCRIPT" | awk '{print $1}')"
 
-      - name: Re-sign same 11.5.4.17 payload while preserving target entitlements
+      - name: Re-sign dynamic payload while preserving target entitlements
         env:
           INPUT_IPA: ${{ github.workspace }}/work/baseline.ipa
           OUTPUT_IPA: ${{ github.workspace }}/work/PikminPilot.ipa
@@ -116,13 +137,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo '--- invoking hardened RC5 signer ---'
+          echo "--- invoking hardened signer for Pikmin Pilot $APP_VERSION ---"
           set +e
           bash CloudProvisioning/scripts/rc5_resign_ipa.sh
           rc=$?
           set -e
           if [ "$rc" -ne 0 ]; then
-            echo "RC5 signer failed (exit=$rc). The signer log above contains the exact failing line/command." >&2
+            echo "Signer failed (exit=$rc). The signer log above contains the exact failing line/command." >&2
             exit "$rc"
           fi
           echo '--- output handoff check ---'
@@ -149,7 +170,7 @@ jobs:
             -H 'Content-Type: application/octet-stream' \
             --data-binary "@$IPA" \
             "$BACKEND_URL/internal/jobs/$JOB_ID/result"
-          echo "Uploaded SHA256=$SHA"
+          echo "Uploaded Pikmin Pilot $APP_VERSION SHA256=$SHA"
 
       - name: Report failure to backend
         if: failure()
@@ -159,5 +180,5 @@ jobs:
             -X POST \
             -H "Authorization: Bearer $BACKEND_TOKEN" \
             -H 'Content-Type: application/json' \
-            --data '{"message":"A repo RC5 signing workflow failed; inspect the GitHub Actions run."}' \
+            --data '{"message":"A repo dynamic signing workflow failed; inspect the GitHub Actions run."}' \
             "$BACKEND_URL/internal/jobs/$JOB_ID/failed" || true
