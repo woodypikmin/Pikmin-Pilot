@@ -30,7 +30,7 @@ final class Stage8FullLoopController: ObservableObject {
     private var backgroundGeneration: UInt64 = 0
     private var renewalInProgress = false
     private var criticalTailInProgress = false
-    // Stage 11.5.4.15: once a dispatch has left the expedition list, Pilot is
+    // Stage 11.5.4.16: once a dispatch has left the expedition list, Pilot is
     // forbidden from foregrounding itself until Runner has positively closed
     // the carrying green X and hands control back. This prevents a background
     // renewal/checkpoint from stealing foreground before the close tap.
@@ -72,7 +72,7 @@ final class Stage8FullLoopController: ObservableObject {
 
         beginBackgroundWindow(label: "initial")
         let goal = self.targetDispatches.map(String.init) ?? "∞"
-        emit("STAGE 11.5.4.15 PILOT RUN START • baseline=11.5.3 • automation-core=10.3.1 • transportHost=\(host):49152 • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • Stage 8.2.2 stable loop core • WDA=OFF")
+        emit("STAGE 11.5.4.16 PILOT RUN START • baseline=11.5.3 • automation-core=10.3.1 • transportHost=\(host):49152 • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • Stage 8.2.2 stable loop core • WDA=OFF")
 
         worker = Task { [weak self] in
             guard let self else { return }
@@ -80,7 +80,7 @@ final class Stage8FullLoopController: ObservableObject {
         }
     }
 
-    // Stage 11.5.4.15: run the same verified 10.3.1 automation core on an
+    // Stage 11.5.4.16: run the same verified 10.3.1 automation core on an
     // already-established persistent RSD session. This is the cellular escape
     // path: no operation below is allowed to reconnect to RemotePairing :49152.
     func startPersistent(
@@ -114,7 +114,7 @@ final class Stage8FullLoopController: ObservableObject {
 
         beginBackgroundWindow(label: "persistent-cellular")
         let goal = self.targetDispatches.map(String.init) ?? "∞"
-        emit("STAGE 11.5.4.15 PERSISTENT CELLULAR RUN START • automation-core=10.3.1 • transport=\(transportLabel) • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • RPPairing-reconnect=DISABLED")
+        emit("STAGE 11.5.4.16 PERSISTENT CELLULAR RUN START • automation-core=10.3.1 • transport=\(transportLabel) • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • RPPairing-reconnect=DISABLED")
 
         worker = Task { [weak self] in
             guard let self else { return }
@@ -270,7 +270,7 @@ final class Stage8FullLoopController: ObservableObject {
                 ) else {
                     consecutiveEmptyFullScans += 1
 
-                    // Stage 11.5.4.15 HARD COUNT LATCH: a finite target is a
+                    // Stage 11.5.4.16 HARD COUNT LATCH: a finite target is a
                     // contract, not a best-effort loop. A detector/list refresh
                     // miss is recoverable and MUST NOT end a 5/5 (or N/N) run.
                     // Stay on the same round until an item appears, the user
@@ -480,7 +480,7 @@ final class Stage8FullLoopController: ObservableObject {
         setPhase("前往探險")
 
         if item.kind == .seedling {
-            // Stage 11.5.4.15: seedling artwork can itself be blue, so never use
+            // Stage 11.5.4.16: seedling artwork can itself be blue, so never use
             // blue-pixel geometry to choose the detail-page CTA. OCR the literal
             // CTA text and tap the text centre. This leaves the proven fruit path
             // completely unchanged.
@@ -505,7 +505,7 @@ final class Stage8FullLoopController: ObservableObject {
 
             // One short, text-based transition check. No 18-frame loop and no
             // horizontal gesture is sent unless the selection screen is seen.
-            guard try await confirmSeedlingSelectionPage(
+            guard try await confirmPikminSelectionPage(
                 engine: engine,
                 round: round
             ) else {
@@ -535,10 +535,13 @@ final class Stage8FullLoopController: ObservableObject {
             try checkCancelled()
         }
 
-        // Stage 11.5.4.15 FOREGROUND LOCK: do NOT foreground Pikmin Pilot here.
-        // 11.5.4.9 could renew/checkpoint Pilot between the expedition detail and
-        // the carrying-close tail, which occasionally stole foreground before X.
-        // The background budget was renewed at the safe list boundary above.
+        // Stage 11.5.4.16: the detail/OCR transition is now proven, but field logs
+        // showed only ~14-17s of finite background time remained by the time the
+        // critical Runner tail began. That is not enough margin for select→GO→X
+        // plus Runner→Pilot handoff. Renew only at this verified selection-page
+        // checkpoint, then re-confirm the page before any filter-row gesture.
+        try await ensurePreCriticalTailBudget(engine: engine, round: round)
+
         setPhase("辨識\(pikminType.displayName)皮克敏")
         emit("ROUND \(round) • selection page stable • detect \(pikminType.shortName) filter on fresh foreground-locked frame")
         await pause(fastMode ? 0.18 : 0.28)
@@ -606,8 +609,16 @@ final class Stage8FullLoopController: ObservableObject {
         let remaining = UIApplication.shared.backgroundTimeRemaining
         if remaining.isFinite {
             emit(String(format: "ROUND %d • fresh background budget before critical tail = %.1fs", round, remaining))
+            // Do not knowingly start an atomic tail when iOS has already consumed
+            // most of the host background window. The late selection-page renewal
+            // should normally keep this well above the floor. Failing here is safer
+            // than completing GO/X and losing the Runner→Pilot handoff afterward.
+            if remaining < 20.0 {
+                throw LoopError(String(format: "phase=pre-critical-tail-budget • only %.1fs remain after filter detection • critical tail NOT started", remaining))
+            }
         }
 
+        let tailStartedAt = Date()
         criticalTailInProgress = true
         backgroundExpiredDuringCriticalTail = false
         let tail = await engine.runXCTestDispatchTail(
@@ -627,7 +638,13 @@ final class Stage8FullLoopController: ObservableObject {
         // but after it returns we must not start the next handoff/reactivation.
         try checkCancelled()
 
-        emit("ROUND \(round) • ONE XCTest critical tail completed ✅ • \(pikminType.shortName)→\(pikminCount)→GO→greenX")
+        let tailElapsed = Date().timeIntervalSince(tailStartedAt)
+        let postTailRemaining = UIApplication.shared.backgroundTimeRemaining
+        if postTailRemaining.isFinite {
+            emit(String(format: "ROUND %d • ONE XCTest critical tail completed ✅ • %@→%d→GO→greenX • tail=%.2fs • background=%.1fs", round, pikminType.shortName, pikminCount, tailElapsed, postTailRemaining))
+        } else {
+            emit(String(format: "ROUND %d • ONE XCTest critical tail completed ✅ • %@→%d→GO→greenX • tail=%.2fs", round, pikminType.shortName, pikminCount, tailElapsed))
+        }
 
         // Stage 8.2.2 Runner activates Pikmin Pilot after tapping the green X.
         // Accept that foreground handoff, start a fresh task, then reactivate
@@ -643,6 +660,14 @@ final class Stage8FullLoopController: ObservableObject {
         engine: IDeviceEngine,
         round: Int
     ) async throws {
+        let handoffStartedAt = Date()
+        let handoffStartRemaining = UIApplication.shared.backgroundTimeRemaining
+        if handoffStartRemaining.isFinite {
+            emit(String(format: "ROUND %d • HANDOFF WAIT begin • appState=%@ • background=%.1fs", round, appStateLabel(), handoffStartRemaining))
+        } else {
+            emit("ROUND \(round) • HANDOFF WAIT begin • appState=\(appStateLabel())")
+        }
+
         var active = UIApplication.shared.applicationState == .active
         if !active {
             for _ in 0..<60 {
@@ -654,11 +679,24 @@ final class Stage8FullLoopController: ObservableObject {
             }
         }
 
+        let handoffElapsed = Date().timeIntervalSince(handoffStartedAt)
+        let handoffEndRemaining = UIApplication.shared.backgroundTimeRemaining
         guard active else {
+            if handoffEndRemaining.isFinite {
+                emit(String(format: "ROUND %d • HANDOFF WAIT failed ❌ • wait=%.2fs • appState=%@ • background=%.1fs", round, handoffElapsed, appStateLabel(), handoffEndRemaining))
+            } else {
+                emit(String(format: "ROUND %d • HANDOFF WAIT failed ❌ • wait=%.2fs • appState=%@", round, handoffElapsed, appStateLabel()))
+            }
             throw LoopError("phase=runner-handoff • verified Runner did not return Pilot foreground; leaving Pikmin Bloom visible for diagnosis")
         }
 
-        // Stage 11.5.4.15 SECOND ACK: Runner 1153-xfix remains untouched.
+        if handoffEndRemaining.isFinite {
+            emit(String(format: "ROUND %d • HANDOFF ACTIVE ✅ • wait=%.2fs • background=%.1fs", round, handoffElapsed, handoffEndRemaining))
+        } else {
+            emit(String(format: "ROUND %d • HANDOFF ACTIVE ✅ • wait=%.2fs", round, handoffElapsed))
+        }
+
+        // Stage 11.5.4.16 SECOND ACK: Runner 1153-xfix remains untouched.
         // Do not trust a single "X disappeared" observation as the final truth:
         // a transient detector miss inside Runner can otherwise foreground Pilot
         // even though the carrying X is still visible. Keep the foreground lock
@@ -808,7 +846,7 @@ final class Stage8FullLoopController: ObservableObject {
         return nil
     }
 
-    // MARK: - Stage 11.5.4.15 seedling detail OCR gate
+    // MARK: - Stage 11.5.4.16 seedling detail OCR gate
 
     private func normalizedAutomationText(_ text: String) -> String {
         text
@@ -863,7 +901,7 @@ final class Stage8FullLoopController: ObservableObject {
         return nil
     }
 
-    private func confirmSeedlingSelectionPage(
+    private func confirmPikminSelectionPage(
         engine: IDeviceEngine,
         round: Int
     ) async throws -> Bool {
@@ -875,12 +913,12 @@ final class Stage8FullLoopController: ObservableObject {
             let textItems = await FruitDetector.recognizeAllText(image: image)
             try checkCancelled()
             if let item = textItems.first(where: { isSelectionHeaderText($0.text) }) {
-                emit("ROUND \(round) • seedling selection confirmed ✅ • header=\(item.text)")
+                emit("ROUND \(round) • selection confirmed ✅ • header=\(item.text)")
                 return true
             }
 
             if attempt == 0 || attempt == 2 {
-                emit("ROUND \(round) • seedling selection confirmation waiting • attempt=\(attempt + 1)/4")
+                emit("ROUND \(round) • selection confirmation waiting • attempt=\(attempt + 1)/4")
             }
             await pause(fastMode ? 0.16 : 0.24)
         }
@@ -1049,6 +1087,70 @@ final class Stage8FullLoopController: ObservableObject {
     }
 
     // MARK: - iOS finite-background renewal
+
+    // Stage 11.5.4.16 controlled late renewal. This is intentionally separate
+    // from ensureBackgroundBudget(): the normal foreground lock remains strict
+    // everywhere else. Only a visually verified Pikmin selection page may open
+    // this one renewal checkpoint.
+    private func ensurePreCriticalTailBudget(
+        engine: IDeviceEngine,
+        round: Int
+    ) async throws {
+        try checkCancelled()
+        guard UIApplication.shared.applicationState != .active else {
+            emit("ROUND \(round) • PRE-TAIL BUDGET • Pilot already foreground; no background renewal required")
+            return
+        }
+
+        let before = UIApplication.shared.backgroundTimeRemaining
+        if before.isFinite {
+            emit(String(format: "ROUND %d • PRE-TAIL BUDGET check • %.1fs remaining • renew-below=26.0s", round, before))
+            if before >= 26.0 { return }
+        } else {
+            return
+        }
+
+        // We are at a safe, verified selection page. Temporarily allow exactly
+        // one Pilot foreground bounce, then immediately restore the lock before
+        // continuing gameplay. refreshBackgroundWindow itself marks renewal as
+        // in-progress so an expiration callback cannot cancel the run mid-refresh.
+        let previousLock = gameplayForegroundLock
+        gameplayForegroundLock = false
+        do {
+            try await refreshBackgroundWindow(
+                engine: engine,
+                reason: "pre-critical-tail-r\(round)"
+            )
+        } catch {
+            gameplayForegroundLock = previousLock
+            throw error
+        }
+        gameplayForegroundLock = previousLock
+        try checkCancelled()
+
+        guard try await confirmPikminSelectionPage(engine: engine, round: round) else {
+            throw LoopError("phase=pre-critical-tail-renewal • Pikmin selection page was not preserved after background renewal")
+        }
+
+        let after = UIApplication.shared.backgroundTimeRemaining
+        if after.isFinite {
+            emit(String(format: "ROUND %d • PRE-TAIL RENEWED ✅ • selection re-confirmed • background=%.1fs", round, after))
+            if after < 22.0 {
+                throw LoopError(String(format: "phase=pre-critical-tail-renewal • renewed background budget is still only %.1fs", after))
+            }
+        } else {
+            emit("ROUND \(round) • PRE-TAIL RENEWED ✅ • selection re-confirmed")
+        }
+    }
+
+    private func appStateLabel() -> String {
+        switch UIApplication.shared.applicationState {
+        case .active: return "active"
+        case .inactive: return "inactive"
+        case .background: return "background"
+        @unknown default: return "unknown"
+        }
+    }
 
     private func ensureBackgroundBudget(
         engine: IDeviceEngine,
