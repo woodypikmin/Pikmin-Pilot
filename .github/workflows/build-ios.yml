@@ -166,6 +166,9 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
+          # RC3: force the actual host/tunnel build settings at xcodebuild time.
+          # Do not rely only on project.yml/XcodeGen defaults: RC2 proved that the
+          # generated product could still resolve to Host 1.0(1) / Tunnel 1153.
           xcodebuild \
             -project PikminPilot.xcodeproj \
             -scheme PikminPilot \
@@ -173,6 +176,8 @@ jobs:
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \
             -derivedDataPath build-host \
+            MARKETING_VERSION=11.5.4.14 \
+            CURRENT_PROJECT_VERSION=1154 \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY=""
@@ -184,12 +189,25 @@ jobs:
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist")" = "$APP_BUNDLE_ID"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$TUNNEL/Info.plist")" = "$TUNNEL_BUNDLE_ID"
 
+          echo "Raw Xcode product versions before normalization:"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Info.plist" || true
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Info.plist" || true
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$TUNNEL/Info.plist" || true
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$TUNNEL/Info.plist" || true
+
+          # Final product-level normalization. This happens before any signing,
+          # therefore the exact Info.plists that iOS will install are signed later.
+          /usr/libexec/PlistBuddy -c 'Set :CFBundleShortVersionString 11.5.4.14' "$APP/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Set :CFBundleVersion 1154' "$APP/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Set :CFBundleShortVersionString 11.5.4.14' "$TUNNEL/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Set :CFBundleVersion 1154' "$TUNNEL/Info.plist"
+
           HOST_MARKETING="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Info.plist")"
           HOST_BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Info.plist")"
           TUNNEL_MARKETING="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$TUNNEL/Info.plist")"
           TUNNEL_BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$TUNNEL/Info.plist")"
-          echo "Built host version=$HOST_MARKETING build=$HOST_BUILD"
-          echo "Built tunnel version=$TUNNEL_MARKETING build=$TUNNEL_BUILD"
+          echo "FINAL host version=$HOST_MARKETING build=$HOST_BUILD"
+          echo "FINAL tunnel version=$TUNNEL_MARKETING build=$TUNNEL_BUILD"
           test "$HOST_MARKETING" = "11.5.4.14"
           test "$HOST_BUILD" = "1154"
           test "$TUNNEL_MARKETING" = "11.5.4.14"
@@ -199,6 +217,8 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
+          # Runner remains the validated 1153-xfix line even though the Host/Tunnel
+          # install build is 1154. Command-line overrides prevent version bleed.
           xcodebuild \
             -project PikminPilot.xcodeproj \
             -scheme PikminPilot \
@@ -207,6 +227,8 @@ jobs:
             -destination 'generic/platform=iOS' \
             -derivedDataPath build-runner \
             build-for-testing \
+            MARKETING_VERSION=11.5.4.14 \
+            CURRENT_PROJECT_VERSION=1153 \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY=""
@@ -397,7 +419,7 @@ jobs:
             PAIRING_MODE="GENERIC"
           fi
           export PIKMIN_RELEASE_VERSION="11.5.4.14"
-          export PIKMIN_RELEASE_BUILD="1153"
+          export PIKMIN_RELEASE_BUILD="1154"
           export PIKMIN_PAIRING_MODE="$PAIRING_MODE"
           # Invoke through bash so GitHub/ZIP executable-bit loss cannot break packaging.
           bash scripts/make-release-kit.sh \
