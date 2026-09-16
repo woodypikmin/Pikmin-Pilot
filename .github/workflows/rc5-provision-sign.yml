@@ -103,20 +103,31 @@ jobs:
           PROFILE_TUNNEL: ${{ github.workspace }}/work/tunnel.mobileprovision
           PROFILE_RUNNER: ${{ github.workspace }}/work/runner.mobileprovision
         shell: bash
-        run: bash CloudProvisioning/scripts/rc5_resign_ipa.sh
+        run: |
+          set -euo pipefail
+          bash CloudProvisioning/scripts/rc5_resign_ipa.sh
+          echo '--- output handoff check ---'
+          ls -lah "${{ github.workspace }}/work"
+          test -s "${{ github.workspace }}/work/PikminPilot.ipa"
+          echo "Signed IPA bytes: $(stat -f%z "${{ github.workspace }}/work/PikminPilot.ipa")"
+          shasum -a 256 "${{ github.workspace }}/work/PikminPilot.ipa"
 
       - name: Upload signed IPA to provisioning backend
         shell: bash
         run: |
           set -euo pipefail
-          SHA="$(shasum -a 256 work/PikminPilot.ipa | awk '{print $1}')"
+          IPA="${{ github.workspace }}/work/PikminPilot.ipa"
+          echo '--- upload input check ---'
+          ls -lah "${{ github.workspace }}/work"
+          test -s "$IPA" || { echo "Signed IPA missing: $IPA" >&2; exit 1; }
+          SHA="$(shasum -a 256 "$IPA" | awk '{print $1}')"
           curl --fail --show-error --silent \
             --retry 4 --retry-all-errors \
             -X PUT \
             -H "Authorization: Bearer $BACKEND_TOKEN" \
             -H "X-IPA-SHA256: $SHA" \
             -H 'Content-Type: application/octet-stream' \
-            --data-binary @work/PikminPilot.ipa \
+            --data-binary "@$IPA" \
             "$BACKEND_URL/internal/jobs/$JOB_ID/result"
           echo "Uploaded SHA256=$SHA"
 
