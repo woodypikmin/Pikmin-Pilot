@@ -30,7 +30,7 @@ final class Stage8FullLoopController: ObservableObject {
     private var backgroundGeneration: UInt64 = 0
     private var renewalInProgress = false
     private var criticalTailInProgress = false
-    // Stage 11.5.4.13: once a dispatch has left the expedition list, Pilot is
+    // Stage 11.5.4.14: once a dispatch has left the expedition list, Pilot is
     // forbidden from foregrounding itself until Runner has positively closed
     // the carrying green X and hands control back. This prevents a background
     // renewal/checkpoint from stealing foreground before the close tap.
@@ -72,7 +72,7 @@ final class Stage8FullLoopController: ObservableObject {
 
         beginBackgroundWindow(label: "initial")
         let goal = self.targetDispatches.map(String.init) ?? "∞"
-        emit("STAGE 11.5.3 PILOT RUN START • automation-core=10.3.1 • transportHost=\(host):49152 • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • Stage 8.2.2 stable loop core • WDA=OFF")
+        emit("STAGE 11.5.4.14 PILOT RUN START • baseline=11.5.3 • automation-core=10.3.1 • transportHost=\(host):49152 • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • Stage 8.2.2 stable loop core • WDA=OFF")
 
         worker = Task { [weak self] in
             guard let self else { return }
@@ -80,7 +80,7 @@ final class Stage8FullLoopController: ObservableObject {
         }
     }
 
-    // Stage 11.5.4.13: run the same verified 10.3.1 automation core on an
+    // Stage 11.5.4.14: run the same verified 10.3.1 automation core on an
     // already-established persistent RSD session. This is the cellular escape
     // path: no operation below is allowed to reconnect to RemotePairing :49152.
     func startPersistent(
@@ -114,7 +114,7 @@ final class Stage8FullLoopController: ObservableObject {
 
         beginBackgroundWindow(label: "persistent-cellular")
         let goal = self.targetDispatches.map(String.init) ?? "∞"
-        emit("STAGE 11.5.4.13 PERSISTENT CELLULAR RUN START • automation-core=10.3.1 • transport=\(transportLabel) • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • RPPairing-reconnect=DISABLED")
+        emit("STAGE 11.5.4.14 PERSISTENT CELLULAR RUN START • automation-core=10.3.1 • transport=\(transportLabel) • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • RPPairing-reconnect=DISABLED")
 
         worker = Task { [weak self] in
             guard let self else { return }
@@ -142,7 +142,7 @@ final class Stage8FullLoopController: ObservableObject {
         cancelled = true
         stopAfterCurrentRequested = false
         setPhase("立即停止中")
-        emit("STOP NOW requested • cancelling worker • no new automation command will be started")
+        emit("STOP NOW requested ⚡️ • cancellation latched • only an already in-flight XCTest/DTX command may finish; no next tap/swipe/capture will be started")
         worker?.cancel()
     }
 
@@ -270,7 +270,7 @@ final class Stage8FullLoopController: ObservableObject {
                 ) else {
                     consecutiveEmptyFullScans += 1
 
-                    // Stage 11.5.4.13 HARD COUNT LATCH: a finite target is a
+                    // Stage 11.5.4.14 HARD COUNT LATCH: a finite target is a
                     // contract, not a best-effort loop. A detector/list refresh
                     // miss is recoverable and MUST NOT end a 5/5 (or N/N) run.
                     // Stay on the same round until an item appears, the user
@@ -478,32 +478,20 @@ final class Stage8FullLoopController: ObservableObject {
         await pause(fastMode ? 0.55 : 0.85)
 
         setPhase("前往探險")
-        emit("ROUND \(round) • detect 前往探險")
-        guard let expedition = try await waitForPoint(
-            engine: engine,
-            attempts: 18,
-            delay: 0.38,
-            stage: "expedition-button",
-            detector: ImageAutomationDetector.detectExpeditionButton
-        ) else {
-            throw LoopError("Round \(round): 前往探險 not detected")
+        emit("ROUND \(round) • detect 前往探險 • strict CTA geometry + selection-page gate")
+        guard try await enterPikminSelectionPage(engine: engine, round: round) else {
+            throw LoopError("Round \(round): 前往探險/selection transition not verified • no filter-row swipe sent")
         }
+        try checkCancelled()
 
-        try await tap(
-            engine: engine,
-            pixel: expedition.point,
-            image: expedition.image,
-            stage: "expedition-button"
-        )
-        await pause(fastMode ? 1.45 : 2.0)
-
-        // Stage 11.5.4.13 FOREGROUND LOCK: do NOT foreground Pikmin Pilot here.
+        // Stage 11.5.4.14 FOREGROUND LOCK: do NOT foreground Pikmin Pilot here.
         // 11.5.4.9 could renew/checkpoint Pilot between the expedition detail and
         // the carrying-close tail, which occasionally stole foreground before X.
         // The background budget was renewed at the safe list boundary above.
         setPhase("辨識\(pikminType.displayName)皮克敏")
         emit("ROUND \(round) • selection page stable • detect \(pikminType.shortName) filter on fresh foreground-locked frame")
         await pause(fastMode ? 0.18 : 0.28)
+        try checkCancelled()
 
         emit("ROUND \(round) • reveal Pikmin filter row • target=\(pikminType.shortName)")
         let revealFrame = try await capture(engine: engine, tag: "pikmin-filter-reveal-geometry")
@@ -619,7 +607,7 @@ final class Stage8FullLoopController: ObservableObject {
             throw LoopError("phase=runner-handoff • verified Runner did not return Pilot foreground; leaving Pikmin Bloom visible for diagnosis")
         }
 
-        // Stage 11.5.4.13 SECOND ACK: Runner 1153-xfix remains untouched.
+        // Stage 11.5.4.14 SECOND ACK: Runner 1153-xfix remains untouched.
         // Do not trust a single "X disappeared" observation as the final truth:
         // a transient detector miss inside Runner can otherwise foreground Pilot
         // even though the carrying X is still visible. Keep the foreground lock
@@ -769,6 +757,71 @@ final class Stage8FullLoopController: ObservableObject {
         return nil
     }
 
+    /// Stage 11.5.4.14 seedling-detail safety gate.
+    ///
+    /// We are not allowed to send the horizontal Pikmin-filter reveal swipe until
+    /// two independent facts are true:
+    /// 1) a button-shaped cyan/blue CTA was tapped, and
+    /// 2) the next live frame visually looks like the Pikmin-selection page.
+    ///
+    /// This prevents ice-blue / huge seedling artwork from being mistaken for the
+    /// CTA and eliminates the old "detail page keeps sliding sideways" failure.
+    private func enterPikminSelectionPage(
+        engine: IDeviceEngine,
+        round: Int
+    ) async throws -> Bool {
+        var ctaTapAttempts = 0
+        var visualMisses = 0
+
+        for frameIndex in 0..<18 {
+            try checkCancelled()
+            if frameIndex % 4 == 0 {
+                try await ensureBackgroundBudget(engine: engine, stage: "expedition-button")
+            }
+
+            let image = try await capture(engine: engine, tag: "expedition-detail-gate")
+            screenshotSink?(image)
+            try checkCancelled()
+
+            // A previous tap may already have succeeded. Never tap the old detail
+            // page again when the selection page is positively visible.
+            if ImageAutomationDetector.isPikminSelectionPage(image) {
+                emit("ROUND \(round) • SELECTION GATE ✅ • Pikmin selection page visually confirmed • CTA taps=\(ctaTapAttempts)")
+                return true
+            }
+
+            if let point = ImageAutomationDetector.detectExpeditionButton(in: image),
+               ctaTapAttempts < 3 {
+                ctaTapAttempts += 1
+                emit("ROUND \(round) • 前往探險 strict CTA found • tap \(ctaTapAttempts)/3")
+                try await tap(
+                    engine: engine,
+                    pixel: point,
+                    image: image,
+                    stage: "expedition-button",
+                    allowBackgroundRenewal: false
+                )
+                try checkCancelled()
+                await pause(fastMode ? 0.62 : 0.90)
+                try checkCancelled()
+                continue
+            }
+
+            visualMisses += 1
+            if frameIndex == 0 || frameIndex == 4 || frameIndex == 9 || frameIndex == 14 {
+                emit("ROUND \(round) • 前往探險 strict CTA/selection gate waiting • frame=\(frameIndex + 1)/18 • ctaTaps=\(ctaTapAttempts) • misses=\(visualMisses)")
+            }
+
+            // Fail closed. This is intentionally a quiet wait only: no horizontal
+            // gesture is permitted while the detail/selection state is uncertain.
+            await pause(fastMode ? 0.22 : 0.32)
+            try checkCancelled()
+        }
+
+        emit("ROUND \(round) • SELECTION GATE ❌ • no verified transition after strict CTA scan • horizontal filter-row swipe suppressed")
+        return false
+    }
+
     private func waitForPoint(
         engine: IDeviceEngine,
         attempts: Int,
@@ -821,12 +874,14 @@ final class Stage8FullLoopController: ObservableObject {
         engine: IDeviceEngine,
         tag: String
     ) async throws -> UIImage {
+        try checkCancelled()
         let safeTag = tag.replacingOccurrences(of: "/", with: "-")
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("PikminPilot-Stage10.3-\(safeTag).png")
         try? FileManager.default.removeItem(at: url)
 
         let result = await engine.takeScreenshot(outputPath: url.path)
+        try checkCancelled()
         guard result.ok else {
             throw LoopError("phase=dvt-screenshot/\(tag) • \(result.message)")
         }
@@ -862,6 +917,7 @@ final class Stage8FullLoopController: ObservableObject {
         }
 
         let result = await engine.runXCTestTap(normalizedX: x, normalizedY: y)
+        try checkCancelled()
         guard result.ok else {
             throw LoopError("phase=\(stage)-tap • \(result.message)")
         }
@@ -921,6 +977,7 @@ final class Stage8FullLoopController: ObservableObject {
             toY: toY,
             duration: duration
         )
+        try checkCancelled()
         guard result.ok else {
             throw LoopError("phase=\(stage)-swipe • \(result.message)")
         }
@@ -1013,7 +1070,7 @@ final class Stage8FullLoopController: ObservableObject {
     }
 
     private func checkCancelled() throws {
-        if cancelled {
+        if cancelled || Task.isCancelled {
             throw LoopError("cancelled")
         }
     }

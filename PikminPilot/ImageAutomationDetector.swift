@@ -95,83 +95,147 @@ final class ImageAutomationDetector {
         )
     }
 
+    /// Stage 11.5.4.14: detect the real "Go to Expedition" control by
+    /// *button geometry*, not merely by the amount of blue pixels.
+    ///
+    /// The old detector accepted any sufficiently large blue component in the
+    /// lower half of the detail page. Ice-blue seedlings have a large blue pot,
+    /// so that object could outrank the actual button and be tapped. Pilot then
+    /// assumed it was already on the Pikmin-selection page and sent horizontal
+    /// filter-row swipes into the still-open detail page.
+    ///
+    /// This detector is deliberately fail-closed: the candidate must be a wide,
+    /// shallow, horizontally centred blue rounded-rectangle-like component.
     static func detectExpeditionButton(
         in image: UIImage
     ) -> CGPoint? {
-        guard let (w, h, data) =
-            FruitDetector.rawPixels(image)
-        else {
+        guard let (w, h, data) = FruitDetector.rawPixels(image) else {
             return nil
         }
 
-        var mask = [Bool](
-            repeating: false,
-            count: w * h
-        )
+        let viewport = activeContentRect(in: image)
+        let minDim = max(1.0, min(viewport.width, viewport.height))
+        let x0 = max(0, Int(viewport.minX + viewport.width * 0.08))
+        let x1 = min(w, Int(viewport.maxX - viewport.width * 0.08))
+        let y0 = max(0, Int(viewport.minY + viewport.height * 0.50))
+        let y1 = min(h, Int(viewport.minY + viewport.height * 0.94))
 
-        let x0 = Int(Double(w) * 0.18)
-        let x1 = Int(Double(w) * 0.82)
-
-        let y0 = Int(Double(h) * 0.55)
-        let y1 = Int(Double(h) * 0.84)
-
+        var mask = [Bool](repeating: false, count: w * h)
         for y in y0..<y1 {
             for x in x0..<x1 {
-                let p = FruitDetector.pixel(
-                    data,
-                    width: w,
-                    x: x,
-                    y: y
-                )
-
+                let p = FruitDetector.pixel(data, width: w, x: x, y: y)
                 let v = FruitDetector.hsv(p)
 
-                // OpenCV H 70...105 -> approx 140...210 degrees.
-                if v.h >= 135 &&
-                    v.h <= 215 &&
-                    v.s > 0.25 &&
-                    v.v > 0.31 {
+                // Pikmin Bloom's expedition CTA is cyan/blue. Keep this a little
+                // broader than the old range so display tone / screenshot colour
+                // management does not cause a false negative.
+                let blueCTA = v.h >= 128 && v.h <= 222 &&
+                    v.s >= 0.22 && v.v >= 0.30
+                if blueCTA { mask[y * w + x] = true }
+            }
+        }
+
+        let components = componentCenters(mask: mask, width: w, height: h)
+        var scored: [(score: CGFloat, point: CGPoint)] = []
+
+        for (rect, count) in components {
+            let widthRatio = rect.width / viewport.width
+            let heightRatio = rect.height / viewport.height
+            let aspect = rect.width / max(1.0, rect.height)
+            let fill = CGFloat(count) / max(1.0, rect.width * rect.height)
+            let centerX = rect.midX
+            let centerY = rect.midY
+
+            // A seedling pot / fruit icon is roughly square. The real CTA is
+            // conspicuously wide and shallow, so reject anything icon-shaped.
+            guard widthRatio >= 0.24 && widthRatio <= 0.82 else { continue }
+            guard heightRatio >= 0.028 && heightRatio <= 0.145 else { continue }
+            guard aspect >= 2.35 && aspect <= 14.0 else { continue }
+            guard fill >= 0.22 else { continue }
+            guard count >= Int(minDim * minDim * 0.00022) else { continue }
+
+            let centerOffset = abs(centerX - viewport.midX) / viewport.width
+            guard centerOffset <= 0.20 else { continue }
+
+            let normalizedY = (centerY - viewport.minY) / viewport.height
+            guard normalizedY >= 0.52 && normalizedY <= 0.92 else { continue }
+
+            // Prefer a centred, medium-width CTA. Count/fill help when white text
+            // punches small holes into the blue background.
+            let widthPenalty = abs(widthRatio - 0.56) * 1.20
+            let centerPenalty = centerOffset * 2.20
+            let yPenalty = abs(normalizedY - 0.76) * 0.35
+            let aspectBonus = min(aspect, 8.0) * 0.025
+            let fillBonus = fill * 0.55
+            let score = fillBonus + aspectBonus - widthPenalty - centerPenalty - yPenalty
+
+            scored.append((score, CGPoint(x: centerX, y: centerY)))
+        }
+
+        return scored.max(by: { $0.score < $1.score })?.point
+    }
+
+    /// A fail-closed visual gate for the Pikmin-selection page.
+    ///
+    /// The selection page contains a row of several small coloured circular
+    /// filter chips. We require a horizontal cluster of >=4 chip-like components
+    /// before the host is allowed to send the reveal/filter-row swipe. This is
+    /// independent of device model and prevents a false expedition-button tap
+    /// from turning into repeated horizontal swipes on a seedling detail page.
+    static func isPikminSelectionPage(
+        _ image: UIImage
+    ) -> Bool {
+        guard let (w, h, data) = FruitDetector.rawPixels(image) else {
+            return false
+        }
+
+        let viewport = activeContentRect(in: image)
+        let minDim = max(1.0, min(viewport.width, viewport.height))
+        let x0 = max(0, Int(viewport.minX + viewport.width * 0.28))
+        let x1 = min(w, Int(viewport.maxX - viewport.width * 0.01))
+        let y0 = max(0, Int(viewport.minY + viewport.height * 0.33))
+        let y1 = min(h, Int(viewport.minY + viewport.height * 0.55))
+
+        var mask = [Bool](repeating: false, count: w * h)
+        for y in y0..<y1 {
+            for x in x0..<x1 {
+                let p = FruitDetector.pixel(data, width: w, x: x, y: y)
+                let v = FruitDetector.hsv(p)
+                // Pastel colour chips remain bright but may have modest saturation.
+                if v.s >= 0.13 && v.v >= 0.58 {
                     mask[y * w + x] = true
                 }
             }
         }
 
-        let components = componentCenters(
-            mask: mask,
-            width: w,
-            height: h
-        )
-
-        let candidates = components.compactMap {
-            rect,
-            count -> (Double, CGPoint)? in
-
-            if count <
-                Int(
-                    Double(w * h)
-                    * 0.00035
-                ) {
-                return nil
-            }
-
-            if rect.width <
-                Double(w) * 0.12 {
-                return nil
-            }
-
-            return (
-                Double(count),
-                CGPoint(
-                    x: rect.midX,
-                    y: rect.midY
-                )
-            )
-        }
-        .sorted {
-            $0.0 > $1.0
+        let components = componentCenters(mask: mask, width: w, height: h)
+        let chips: [CGPoint] = components.compactMap { rect, count in
+            let wf = rect.width / minDim
+            let hf = rect.height / minDim
+            let aspect = rect.width / max(1.0, rect.height)
+            guard count >= Int(minDim * minDim * 0.00008) else { return nil }
+            guard wf >= 0.018 && wf <= 0.080 else { return nil }
+            guard hf >= 0.018 && hf <= 0.080 else { return nil }
+            guard aspect >= 0.52 && aspect <= 1.60 else { return nil }
+            return CGPoint(x: rect.midX, y: rect.midY)
         }
 
-        return candidates.first?.1
+        guard chips.count >= 4 else { return false }
+
+        // Find a horizontally aligned cluster. Pikmin sprites below the row may
+        // also contain colour, but they do not produce 4+ small circles at one Y.
+        let yTolerance = max(8.0, viewport.height * 0.030)
+        for anchor in chips {
+            let aligned = chips.filter { abs($0.y - anchor.y) <= yTolerance }
+            guard aligned.count >= 4 else { continue }
+            let xs = aligned.map(\.x)
+            if let minX = xs.min(), let maxX = xs.max(),
+               maxX - minX >= viewport.width * 0.22 {
+                return true
+            }
+        }
+
+        return false
     }
 
     static func detectPinkFilter(
