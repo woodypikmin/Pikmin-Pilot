@@ -117,9 +117,7 @@ final class PikminPilotRunnerUITests: XCTestCase {
                 return
             }
 
-            app.coordinate(
-                withNormalizedOffset: CGVector(dx: goPoint.x, dy: goPoint.y)
-            ).tap()
+            screenNormalizedCoordinate(goPoint, in: app).tap()
 
             // Stage 11.5.2: the carrying-close point must come from the live
             // screenshot, and the close action must be VERIFIED before Pilot is
@@ -150,9 +148,7 @@ final class PikminPilotRunnerUITests: XCTestCase {
                     return
                 }
 
-                app.coordinate(
-                    withNormalizedOffset: CGVector(dx: closePoint.x, dy: closePoint.y)
-                ).tap()
+                screenNormalizedCoordinate(closePoint, in: app).tap()
                 usleep(afterClose)
 
                 // Verify that the same lower-left green close control actually
@@ -262,6 +258,37 @@ final class PikminPilotRunnerUITests: XCTestCase {
         usleep(120_000)
     }
 
+    /// Stage 11.5.4.13: screenshot detectors return screen-normalized
+    /// points, while XCUIApplication coordinates are app-frame normalized.
+    /// Convert explicitly so iPad/compatibility layouts do not accumulate
+    /// a vertical or horizontal offset.
+    private func screenNormalizedCoordinate(
+        _ point: CGPoint,
+        in app: XCUIApplication
+    ) -> XCUICoordinate {
+        let screenImage = XCUIScreen.main.screenshot().image
+        let screenSize = screenImage.size
+        let frame = app.frame
+
+        guard screenSize.width > 1, screenSize.height > 1,
+              frame.width > 1, frame.height > 1 else {
+            return app.coordinate(
+                withNormalizedOffset: CGVector(dx: point.x, dy: point.y)
+            )
+        }
+
+        let screenPoint = CGPoint(
+            x: point.x * screenSize.width,
+            y: point.y * screenSize.height
+        )
+        let appX = min(1.0, max(0.0, (screenPoint.x - frame.minX) / frame.width))
+        let appY = min(1.0, max(0.0, (screenPoint.y - frame.minY) / frame.height))
+
+        return app.coordinate(
+            withNormalizedOffset: CGVector(dx: appX, dy: appY)
+        )
+    }
+
     @discardableResult
     private func selectPikminGrid(
         in app: XCUIApplication,
@@ -274,26 +301,30 @@ final class PikminPilotRunnerUITests: XCTestCase {
         }
 
         for point in points.prefix(min(12, max(2, count))) {
-            app.coordinate(
-                withNormalizedOffset: CGVector(dx: point.x, dy: point.y)
-            ).tap()
+            screenNormalizedCoordinate(point, in: app).tap()
             usleep(interTapDelayUS)
         }
         return true
     }
 
-    /// Builds a scalable 5-column selection lattice inside the *live* game
-    /// viewport, then locally refines every slot to the strongest visual center
-    /// in that neighborhood. The old 868x1836 pixel taps are no longer used.
+    /// Stage 11.5.4.13 Adaptive Geometry.
+    ///
+    /// Keep the proven five-column ordering, but stop hard-coding the three row
+    /// Y positions. Row centers are measured from the current screenshot by
+    /// scanning visual energy across the five live column anchors. This lets
+    /// tall iPhones and wider iPads use the same code path.
+    ///
+    /// If row discovery is ambiguous, use a smooth aspect-ratio interpolation
+    /// between the verified phone geometry and the observed tablet geometry,
+    /// rather than maintaining device-model profiles.
     private func detectPikminSelectionGrid(in image: UIImage) -> [CGPoint]? {
         guard let (w, h, data) = rawPixels(image) else { return nil }
         let viewport = activeContentRect(width: w, height: h, data: data)
         guard viewport.width > 0, viewport.height > 0 else { return nil }
 
         let columns = [0.129, 0.313, 0.492, 0.672, 0.849]
-        let rows = [0.517, 0.662, 0.801]
-        let searchX = viewport.width * 0.055
-        let searchY = viewport.height * 0.040
+        let searchX = viewport.width * 0.060
+        let searchY = viewport.height * 0.042
         let step = max(3, Int(min(viewport.width, viewport.height) / 180.0))
         let patchRadius = max(5, Int(min(viewport.width, viewport.height) * 0.018))
 
@@ -322,6 +353,48 @@ final class PikminPilotRunnerUITests: XCTestCase {
                 }
             }
             return samples > 0 ? score / Double(samples) : -1
+        }
+
+        // Aspect ratio gives a stable first estimate across phone/tablet form
+        // factors. Then each row is refined from the *current* screenshot by
+        // maximizing average visual energy across all five columns near that
+        // estimate. This avoids choosing text/name bands as rows.
+        let aspect = Double(viewport.width / max(1, viewport.height))
+        let t = min(1.0, max(0.0, (aspect - 0.48) / (0.70 - 0.48)))
+        let phoneRows = [0.517, 0.662, 0.801]
+        let tabletRows = [0.550, 0.720, 0.885]
+        let fallbackRows = zip(phoneRows, tabletRows).map { a, b in
+            a + (b - a) * t
+        }
+
+        var rows: [Double] = []
+        let collectiveSearch = viewport.height * 0.060
+        let collectiveStep = max(3, Int(viewport.height / 260.0))
+        for seedRow in fallbackRows {
+            let seedY = viewport.minY + viewport.height * seedRow
+            var bestY = seedY
+            var bestCollective = -Double.infinity
+            var cy = Int(seedY - collectiveSearch)
+            while cy <= Int(seedY + collectiveSearch) {
+                var sum = 0.0
+                var used = 0
+                for column in columns {
+                    let cx = Int(viewport.minX + viewport.width * column)
+                    if cx > 1, cx < w - 2, cy > 1, cy < h - 2 {
+                        sum += visualScore(cx, cy)
+                        used += 1
+                    }
+                }
+                if used > 0 {
+                    let collective = sum / Double(used)
+                    if collective > bestCollective {
+                        bestCollective = collective
+                        bestY = CGFloat(cy)
+                    }
+                }
+                cy += collectiveStep
+            }
+            rows.append(Double((bestY - viewport.minY) / viewport.height))
         }
 
         var result: [CGPoint] = []
@@ -411,8 +484,8 @@ final class PikminPilotRunnerUITests: XCTestCase {
         // Restricting hue/value here avoids merging it into Pikmin Bloom's bright
         // cyan ocean background (the 11.5.2 broad green mask could do that).
         let x0 = max(0, Int(viewport.minX))
-        let x1 = min(w, Int(viewport.minX + viewport.width * 0.32))
-        let y0 = max(0, Int(viewport.minY + viewport.height * 0.68))
+        let x1 = min(w, Int(viewport.minX + viewport.width * 0.42))
+        let y0 = max(0, Int(viewport.minY + viewport.height * 0.60))
         let y1 = min(h, Int(viewport.maxY))
         var mask = [Bool](repeating: false, count: w * h)
 
@@ -440,7 +513,7 @@ final class PikminPilotRunnerUITests: XCTestCase {
             let center = CGPoint(x: rect.midX, y: rect.midY)
             let nx = (center.x - viewport.minX) / max(1, viewport.width)
             let ny = (center.y - viewport.minY) / max(1, viewport.height)
-            guard nx <= 0.30 && ny >= 0.70 else { continue }
+            guard nx <= 0.40 && ny >= 0.62 else { continue }
 
             // Confirm that the candidate contains a small amount of bright,
             // low-saturation white pixels from the X glyph.
@@ -463,7 +536,7 @@ final class PikminPilotRunnerUITests: XCTestCase {
             guard whiteFraction >= 0.006 else { continue }
 
             let shapePenalty = abs(log(max(0.001, aspect)))
-            let locationPenalty = nx * 0.08 + abs(ny - 0.91) * 0.03
+            let locationPenalty = nx * 0.055 + abs(ny - 0.90) * 0.018
             let areaBonus = min(0.20, Double(count) / contentArea * 14.0)
             let whiteBonus = min(0.10, whiteFraction * 2.5)
             let score = shapePenalty + locationPenalty - areaBonus - whiteBonus

@@ -314,7 +314,9 @@ final class FruitDetector {
         height h: Int
     ) -> [LineBand] {
         let columnWidth = Double(w) / 3.0
-        let startY = Int(Double(h) * 0.16)
+        // 11.5.4.13: status cards may begin in the high first row on iPad.
+        // Border color/coverage checks remain unchanged; only the scan ceiling moves up.
+        let startY = Int(Double(h) * 0.035)
         let endY = Int(Double(h) * 0.98)
 
         var rawHits: [(CardState, Int, Int)] = []
@@ -906,19 +908,30 @@ final class FruitDetector {
             .joined(separator: " ")
     }
 
-    /// Expedition-list seedling labels are color-qualified (for example
-    /// `灰色花苗`, `藍色花苗`, `粉紅色花苗`). The screen also has a top-level
-    /// navigation/tab label that is only `花苗`; that label opens the seedling
-    /// inventory/view page and must never be treated as a transport target.
+    /// Stage 11.5.4.13 seedling-label compatibility.
     ///
-    /// Require `色花苗` after whitespace/newline normalization so plain
-    /// `花苗` is ignored completely.
+    /// Keep the proven Stage 10.3 `色花苗` rule intact, and add the two real
+    /// expedition labels that do not contain the `色` character:
+    /// `冰藍花苗` and `大花苗`.
+    ///
+    /// Plain `花苗` remains explicitly rejected so the top-level navigation
+    /// label can never become a transport target.
     static func isSeedlingLabel(_ text: String) -> Bool {
         let normalized = text
             .replacingOccurrences(of: " ", with: "")
             .replacingOccurrences(of: "\n", with: "")
             .replacingOccurrences(of: "\t", with: "")
-        return normalized.contains("色花苗")
+
+        if normalized == "花苗" {
+            return false
+        }
+
+        if normalized.contains("色花苗") {
+            return true
+        }
+
+        return normalized.contains("冰藍花苗") ||
+            normalized.contains("大花苗")
     }
 
     static func isKnownFruitLabel(_ text: String) -> Bool {
@@ -934,10 +947,17 @@ final class FruitDetector {
     static func objectCandidates(
         data: [UInt8],
         width w: Int,
-        height h: Int
+        height h: Int,
+        scanStartY: Int? = nil
     ) -> [(CGRect, Int)] {
-        let startY =
-            Int(Double(h) * 0.16)
+        // 11.5.4.13: the first expedition row can sit above 16% on iPad.
+        let startY = max(
+            0,
+            min(
+                h - 1,
+                scanStartY ?? Int(Double(h) * 0.16)
+            )
+        )
 
         let endY =
             Int(Double(h) * 0.96)
@@ -982,10 +1002,27 @@ final class FruitDetector {
         seedlings: [FruitCandidate],
         blocked: [FruitCandidate]
     ) {
+        let targetLabelRects = ocr
+            .filter { isKnownFruitLabel($0.text) || isSeedlingLabel($0.text) }
+            .map { $0.rect }
+
+        let adaptiveStartY: Int
+        if let topLabelY = targetLabelRects.map({ $0.minY }).min() {
+            adaptiveStartY = Int(
+                max(
+                    Double(h) * 0.035,
+                    topLabelY - Double(h) * 0.145
+                )
+            )
+        } else {
+            adaptiveStartY = Int(Double(h) * 0.16)
+        }
+
         let components = objectCandidates(
             data: data,
             width: w,
-            height: h
+            height: h,
+            scanStartY: adaptiveStartY
         )
 
         let columnWidth =
@@ -1144,7 +1181,7 @@ final class FruitDetector {
             let col = min(2, max(0, Int(item.rect.midX / columnWidth)))
             let centerX = (Double(col) + 0.5) * columnWidth
             let centerY = max(
-                Double(h) * 0.17,
+                Double(h) * 0.045,
                 item.rect.minY - Double(h) * 0.070
             )
             let center = CGPoint(x: centerX, y: centerY)
