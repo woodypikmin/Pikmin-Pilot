@@ -230,12 +230,18 @@ log 'Verifying outer signatures...'
 [[ "$(bundle_id_from_plist "$APP_PATH/Info.plist")" == "$APP_ID" ]] || die 'App bundle id changed unexpectedly'
 [[ "$(bundle_id_from_plist "$TUNNEL_PATH/Info.plist")" == "$TUNNEL_ID" ]] || die 'Tunnel bundle id changed unexpectedly'
 
-rm -f "$OUTPUT_IPA"
+# Build to a private temporary path first, then atomically copy to OUTPUT_IPA.
+# This avoids any cwd/path ambiguity while zip is running inside $OUTER.
+FINAL_TMP="$WORK/PikminPilot.final.ipa"
+rm -f "$FINAL_TMP" "$OUTPUT_IPA"
+mkdir -p "$(dirname "$OUTPUT_IPA")"
 log 'Packing final signed Pikmin Pilot IPA...'
 (
   cd "$OUTER"
-  /usr/bin/zip -qry -y "$OUTPUT_IPA" .
+  /usr/bin/zip -qry -y "$FINAL_TMP" .
 )
-[[ -s "$OUTPUT_IPA" ]] || die 'Output IPA was not created'
+[[ -s "$FINAL_TMP" ]] || die "Temporary final IPA was not created: $FINAL_TMP"
+cp -f "$FINAL_TMP" "$OUTPUT_IPA"
+[[ -s "$OUTPUT_IPA" ]] || die "Output IPA was not created at requested path: $OUTPUT_IPA"
 log "Created: $OUTPUT_IPA ($(stat -f%z "$OUTPUT_IPA") bytes)"
 log "SHA256: $(shasum -a 256 "$OUTPUT_IPA" | awk '{print $1}')"
