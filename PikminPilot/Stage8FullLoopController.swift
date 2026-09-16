@@ -30,7 +30,7 @@ final class Stage8FullLoopController: ObservableObject {
     private var backgroundGeneration: UInt64 = 0
     private var renewalInProgress = false
     private var criticalTailInProgress = false
-    // Stage 11.5.4.14: once a dispatch has left the expedition list, Pilot is
+    // Stage 11.5.4.15: once a dispatch has left the expedition list, Pilot is
     // forbidden from foregrounding itself until Runner has positively closed
     // the carrying green X and hands control back. This prevents a background
     // renewal/checkpoint from stealing foreground before the close tap.
@@ -72,7 +72,7 @@ final class Stage8FullLoopController: ObservableObject {
 
         beginBackgroundWindow(label: "initial")
         let goal = self.targetDispatches.map(String.init) ?? "∞"
-        emit("STAGE 11.5.4.14 PILOT RUN START • baseline=11.5.3 • automation-core=10.3.1 • transportHost=\(host):49152 • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • Stage 8.2.2 stable loop core • WDA=OFF")
+        emit("STAGE 11.5.4.15 PILOT RUN START • baseline=11.5.3 • automation-core=10.3.1 • transportHost=\(host):49152 • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • Stage 8.2.2 stable loop core • WDA=OFF")
 
         worker = Task { [weak self] in
             guard let self else { return }
@@ -80,7 +80,7 @@ final class Stage8FullLoopController: ObservableObject {
         }
     }
 
-    // Stage 11.5.4.14: run the same verified 10.3.1 automation core on an
+    // Stage 11.5.4.15: run the same verified 10.3.1 automation core on an
     // already-established persistent RSD session. This is the cellular escape
     // path: no operation below is allowed to reconnect to RemotePairing :49152.
     func startPersistent(
@@ -114,7 +114,7 @@ final class Stage8FullLoopController: ObservableObject {
 
         beginBackgroundWindow(label: "persistent-cellular")
         let goal = self.targetDispatches.map(String.init) ?? "∞"
-        emit("STAGE 11.5.4.14 PERSISTENT CELLULAR RUN START • automation-core=10.3.1 • transport=\(transportLabel) • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • RPPairing-reconnect=DISABLED")
+        emit("STAGE 11.5.4.15 PERSISTENT CELLULAR RUN START • automation-core=10.3.1 • transport=\(transportLabel) • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • RPPairing-reconnect=DISABLED")
 
         worker = Task { [weak self] in
             guard let self else { return }
@@ -270,7 +270,7 @@ final class Stage8FullLoopController: ObservableObject {
                 ) else {
                     consecutiveEmptyFullScans += 1
 
-                    // Stage 11.5.4.14 HARD COUNT LATCH: a finite target is a
+                    // Stage 11.5.4.15 HARD COUNT LATCH: a finite target is a
                     // contract, not a best-effort loop. A detector/list refresh
                     // miss is recoverable and MUST NOT end a 5/5 (or N/N) run.
                     // Stay on the same round until an item appears, the user
@@ -478,13 +478,64 @@ final class Stage8FullLoopController: ObservableObject {
         await pause(fastMode ? 0.55 : 0.85)
 
         setPhase("前往探險")
-        emit("ROUND \(round) • detect 前往探險 • strict CTA geometry + selection-page gate")
-        guard try await enterPikminSelectionPage(engine: engine, round: round) else {
-            throw LoopError("Round \(round): 前往探險/selection transition not verified • no filter-row swipe sent")
-        }
-        try checkCancelled()
 
-        // Stage 11.5.4.14 FOREGROUND LOCK: do NOT foreground Pikmin Pilot here.
+        if item.kind == .seedling {
+            // Stage 11.5.4.15: seedling artwork can itself be blue, so never use
+            // blue-pixel geometry to choose the detail-page CTA. OCR the literal
+            // CTA text and tap the text centre. This leaves the proven fruit path
+            // completely unchanged.
+            emit("ROUND \(round) • detect 前往探險 • SEEDLING OCR CTA")
+            guard let expedition = try await waitForSeedlingExpeditionCTA(
+                engine: engine,
+                round: round
+            ) else {
+                throw LoopError("Round \(round): seedling 前往探險 text not detected")
+            }
+
+            try await tap(
+                engine: engine,
+                pixel: expedition.point,
+                image: expedition.image,
+                stage: "expedition-button",
+                allowBackgroundRenewal: false
+            )
+            try checkCancelled()
+            await pause(fastMode ? 1.05 : 1.45)
+            try checkCancelled()
+
+            // One short, text-based transition check. No 18-frame loop and no
+            // horizontal gesture is sent unless the selection screen is seen.
+            guard try await confirmSeedlingSelectionPage(
+                engine: engine,
+                round: round
+            ) else {
+                throw LoopError("Round \(round): seedling 前往探險 was tapped but selection page was not confirmed • filter-row swipe suppressed")
+            }
+        } else {
+            // Proven Stage 11.5.3/11.5.4.12 fruit path: unchanged.
+            emit("ROUND \(round) • detect 前往探險 • baseline fruit detector")
+            guard let expedition = try await waitForPoint(
+                engine: engine,
+                attempts: 18,
+                delay: 0.38,
+                stage: "expedition-button",
+                detector: ImageAutomationDetector.detectExpeditionButton
+            ) else {
+                throw LoopError("Round \(round): 前往探險 not detected")
+            }
+
+            try await tap(
+                engine: engine,
+                pixel: expedition.point,
+                image: expedition.image,
+                stage: "expedition-button"
+            )
+            try checkCancelled()
+            await pause(fastMode ? 1.45 : 2.0)
+            try checkCancelled()
+        }
+
+        // Stage 11.5.4.15 FOREGROUND LOCK: do NOT foreground Pikmin Pilot here.
         // 11.5.4.9 could renew/checkpoint Pilot between the expedition detail and
         // the carrying-close tail, which occasionally stole foreground before X.
         // The background budget was renewed at the safe list boundary above.
@@ -607,7 +658,7 @@ final class Stage8FullLoopController: ObservableObject {
             throw LoopError("phase=runner-handoff • verified Runner did not return Pilot foreground; leaving Pikmin Bloom visible for diagnosis")
         }
 
-        // Stage 11.5.4.14 SECOND ACK: Runner 1153-xfix remains untouched.
+        // Stage 11.5.4.15 SECOND ACK: Runner 1153-xfix remains untouched.
         // Do not trust a single "X disappeared" observation as the final truth:
         // a transient detector miss inside Runner can otherwise foreground Pilot
         // even though the carrying X is still visible. Keep the foreground lock
@@ -757,68 +808,82 @@ final class Stage8FullLoopController: ObservableObject {
         return nil
     }
 
-    /// Stage 11.5.4.14 seedling-detail safety gate.
-    ///
-    /// We are not allowed to send the horizontal Pikmin-filter reveal swipe until
-    /// two independent facts are true:
-    /// 1) a button-shaped cyan/blue CTA was tapped, and
-    /// 2) the next live frame visually looks like the Pikmin-selection page.
-    ///
-    /// This prevents ice-blue / huge seedling artwork from being mistaken for the
-    /// CTA and eliminates the old "detail page keeps sliding sideways" failure.
-    private func enterPikminSelectionPage(
+    // MARK: - Stage 11.5.4.15 seedling detail OCR gate
+
+    private func normalizedAutomationText(_ text: String) -> String {
+        text
+            .replacingOccurrences(of: " ", with: "")
+            .replacingOccurrences(of: "\n", with: "")
+            .replacingOccurrences(of: "\t", with: "")
+            .lowercased()
+    }
+
+    private func isExpeditionCTAText(_ text: String) -> Bool {
+        let t = normalizedAutomationText(text)
+        return t.contains("前往探險") ||
+            t.contains("前往探险") ||
+            t.contains("gotoexpedition") ||
+            t.contains("探検へ") ||
+            t.contains("探險へ")
+    }
+
+    private func isSelectionHeaderText(_ text: String) -> Bool {
+        let t = normalizedAutomationText(text)
+        return t.contains("可以選擇最多") ||
+            t.contains("可以选择最多") ||
+            t.contains("選擇最多") ||
+            t.contains("选择最多") ||
+            t.contains("selectupto")
+    }
+
+    private func waitForSeedlingExpeditionCTA(
+        engine: IDeviceEngine,
+        round: Int
+    ) async throws -> (point: CGPoint, image: UIImage)? {
+        // Keep this deliberately short. The 11.5.4.14 18-frame gate could burn
+        // the host's entire iOS background window before doing any useful action.
+        for attempt in 0..<4 {
+            try checkCancelled()
+            let image = try await capture(engine: engine, tag: "seedling-expedition-ocr")
+            screenshotSink?(image)
+            let textItems = await FruitDetector.recognizeAllText(image: image)
+            try checkCancelled()
+
+            if let item = textItems.first(where: { isExpeditionCTAText($0.text) }) {
+                let point = CGPoint(x: item.rect.midX, y: item.rect.midY)
+                emit("ROUND \(round) • 前往探險 OCR found ✅ • text=\(item.text) • attempt=\(attempt + 1)/4")
+                return (point, image)
+            }
+
+            if attempt == 0 || attempt == 2 {
+                emit("ROUND \(round) • 前往探險 OCR waiting • attempt=\(attempt + 1)/4")
+            }
+            await pause(fastMode ? 0.18 : 0.28)
+        }
+        return nil
+    }
+
+    private func confirmSeedlingSelectionPage(
         engine: IDeviceEngine,
         round: Int
     ) async throws -> Bool {
-        var ctaTapAttempts = 0
-        var visualMisses = 0
-
-        for frameIndex in 0..<18 {
+        for attempt in 0..<4 {
             try checkCancelled()
-            if frameIndex % 4 == 0 {
-                try await ensureBackgroundBudget(engine: engine, stage: "expedition-button")
-            }
-
-            let image = try await capture(engine: engine, tag: "expedition-detail-gate")
+            let image = try await capture(engine: engine, tag: "seedling-selection-confirm")
             screenshotSink?(image)
-            try checkCancelled()
 
-            // A previous tap may already have succeeded. Never tap the old detail
-            // page again when the selection page is positively visible.
-            if ImageAutomationDetector.isPikminSelectionPage(image) {
-                emit("ROUND \(round) • SELECTION GATE ✅ • Pikmin selection page visually confirmed • CTA taps=\(ctaTapAttempts)")
+            let textItems = await FruitDetector.recognizeAllText(image: image)
+            try checkCancelled()
+            if let item = textItems.first(where: { isSelectionHeaderText($0.text) }) {
+                emit("ROUND \(round) • seedling selection confirmed ✅ • header=\(item.text)")
                 return true
             }
 
-            if let point = ImageAutomationDetector.detectExpeditionButton(in: image),
-               ctaTapAttempts < 3 {
-                ctaTapAttempts += 1
-                emit("ROUND \(round) • 前往探險 strict CTA found • tap \(ctaTapAttempts)/3")
-                try await tap(
-                    engine: engine,
-                    pixel: point,
-                    image: image,
-                    stage: "expedition-button",
-                    allowBackgroundRenewal: false
-                )
-                try checkCancelled()
-                await pause(fastMode ? 0.62 : 0.90)
-                try checkCancelled()
-                continue
+            if attempt == 0 || attempt == 2 {
+                emit("ROUND \(round) • seedling selection confirmation waiting • attempt=\(attempt + 1)/4")
             }
-
-            visualMisses += 1
-            if frameIndex == 0 || frameIndex == 4 || frameIndex == 9 || frameIndex == 14 {
-                emit("ROUND \(round) • 前往探險 strict CTA/selection gate waiting • frame=\(frameIndex + 1)/18 • ctaTaps=\(ctaTapAttempts) • misses=\(visualMisses)")
-            }
-
-            // Fail closed. This is intentionally a quiet wait only: no horizontal
-            // gesture is permitted while the detail/selection state is uncertain.
-            await pause(fastMode ? 0.22 : 0.32)
-            try checkCancelled()
+            await pause(fastMode ? 0.16 : 0.24)
         }
-
-        emit("ROUND \(round) • SELECTION GATE ❌ • no verified transition after strict CTA scan • horizontal filter-row swipe suppressed")
         return false
     }
 
