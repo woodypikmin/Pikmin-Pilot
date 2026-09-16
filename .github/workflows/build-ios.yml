@@ -1,4 +1,4 @@
-name: Build Pikmin Pilot Stage 11.5.4.13 Adaptive Geometry + Seedling Compatibility
+name: Build Pikmin Pilot Stage 11.5.4.14 Seedling Detail Gate + Fast Stop
 
 on:
   workflow_dispatch:
@@ -184,6 +184,17 @@ jobs:
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist")" = "$APP_BUNDLE_ID"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$TUNNEL/Info.plist")" = "$TUNNEL_BUNDLE_ID"
 
+          HOST_MARKETING="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Info.plist")"
+          HOST_BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Info.plist")"
+          TUNNEL_MARKETING="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$TUNNEL/Info.plist")"
+          TUNNEL_BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$TUNNEL/Info.plist")"
+          echo "Built host version=$HOST_MARKETING build=$HOST_BUILD"
+          echo "Built tunnel version=$TUNNEL_MARKETING build=$TUNNEL_BUILD"
+          test "$HOST_MARKETING" = "11.5.4.14"
+          test "$HOST_BUILD" = "1154"
+          test "$TUNNEL_MARKETING" = "11.5.4.14"
+          test "$TUNNEL_BUILD" = "1154"
+
       - name: Build current unsigned XCUITest Runner
         shell: bash
         run: |
@@ -207,6 +218,8 @@ jobs:
           echo "RUNNER_APP=$RUNNER_APP" >> "$GITHUB_ENV"
           echo "TEST_BUNDLE=$TEST_BUNDLE" >> "$GITHUB_ENV"
           /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$RUNNER_APP/Info.plist" | tee RunnerBuiltBundleIdentifier.txt
+          RUNNER_BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$RUNNER_APP/Info.plist")"
+          echo "Built Runner wrapper CFBundleVersion=$RUNNER_BUILD (1153-xfix Runner source retained; wrapper metadata is not used as the revision gate)"
           /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$TEST_BUNDLE/Info.plist" | tee XCTestBundleIdentifier.txt
 
       - name: Recursively sign current Runner locally on GitHub macOS
@@ -285,12 +298,12 @@ jobs:
           /usr/bin/codesign -d --entitlements :- "$SIGNED_TEST_BUNDLE" > SignedXCTestEntitlements.plist
 
           cp -R "$SIGNED_RUNNER_APP" Payload/
-          rm -f PikminPilotRunner-Stage11.5.4.13-SIGNED.ipa
-          /usr/bin/zip -qry PikminPilotRunner-Stage11.5.4.13-SIGNED.ipa Payload
+          rm -f PikminPilotRunner-Stage11.5.4.14-SIGNED.ipa
+          /usr/bin/zip -qry PikminPilotRunner-Stage11.5.4.14-SIGNED.ipa Payload
           rm -rf Payload SignedRunnerStage
 
-          test -s PikminPilotRunner-Stage11.5.4.13-SIGNED.ipa
-          unzip -t PikminPilotRunner-Stage11.5.4.13-SIGNED.ipa >/dev/null
+          test -s PikminPilotRunner-Stage11.5.4.14-SIGNED.ipa
+          unzip -t PikminPilotRunner-Stage11.5.4.14-SIGNED.ipa >/dev/null
           echo "Runner recursively signed locally on GitHub macOS; no device discovery was used." | tee -a SigningReport.txt
 
       - name: Embed newly signed Runner into host
@@ -298,7 +311,7 @@ jobs:
         run: |
           set -euxo pipefail
           APP="build-host/Build/Products/Release-iphoneos/PikminPilot.app"
-          cp PikminPilotRunner-Stage11.5.4.13-SIGNED.ipa "$APP/PikminPilotEmbeddedRunner.ipa"
+          cp PikminPilotRunner-Stage11.5.4.14-SIGNED.ipa "$APP/PikminPilotEmbeddedRunner.ipa"
           cp PikminPilotEmbeddedRunnerMetadata.plist "$APP/PikminPilotEmbeddedRunnerMetadata.plist"
           test -s "$APP/PikminPilotEmbeddedRunner.ipa"
           test -s "$APP/PikminPilotEmbeddedRunnerMetadata.plist"
@@ -367,12 +380,12 @@ jobs:
           rm -rf Payload
           mkdir Payload
           cp -R "$APP" Payload/
-          /usr/bin/zip -qry PikminPilot-Stage11.5.4.13-FULLY-SIGNED-DEVELOPMENT.ipa Payload
+          /usr/bin/zip -qry PikminPilot-Stage11.5.4.14-FULLY-SIGNED-DEVELOPMENT.ipa Payload
           rm -rf Payload
-          unzip -t PikminPilot-Stage11.5.4.13-FULLY-SIGNED-DEVELOPMENT.ipa >/dev/null
-          unzip -l PikminPilot-Stage11.5.4.13-FULLY-SIGNED-DEVELOPMENT.ipa | grep -F 'PikminPilotEmbeddedRunner.ipa'
-          unzip -l PikminPilot-Stage11.5.4.13-FULLY-SIGNED-DEVELOPMENT.ipa | grep -F 'PikminPilotTunnel.appex'
-          shasum -a 256 PikminPilot-Stage11.5.4.13-FULLY-SIGNED-DEVELOPMENT.ipa | tee PikminPilotSignedSHA256.txt
+          unzip -t PikminPilot-Stage11.5.4.14-FULLY-SIGNED-DEVELOPMENT.ipa >/dev/null
+          unzip -l PikminPilot-Stage11.5.4.14-FULLY-SIGNED-DEVELOPMENT.ipa | grep -F 'PikminPilotEmbeddedRunner.ipa'
+          unzip -l PikminPilot-Stage11.5.4.14-FULLY-SIGNED-DEVELOPMENT.ipa | grep -F 'PikminPilotTunnel.appex'
+          shasum -a 256 PikminPilot-Stage11.5.4.14-FULLY-SIGNED-DEVELOPMENT.ipa | tee PikminPilotSignedSHA256.txt
 
       - name: Build clean end-user release kit
         shell: bash
@@ -383,29 +396,29 @@ jobs:
           else
             PAIRING_MODE="GENERIC"
           fi
-          export PIKMIN_RELEASE_VERSION="11.5.4.13"
+          export PIKMIN_RELEASE_VERSION="11.5.4.14"
           export PIKMIN_RELEASE_BUILD="1153"
           export PIKMIN_PAIRING_MODE="$PAIRING_MODE"
           # Invoke through bash so GitHub/ZIP executable-bit loss cannot break packaging.
           bash scripts/make-release-kit.sh \
-            PikminPilot-Stage11.5.4.13-FULLY-SIGNED-DEVELOPMENT.ipa \
-            PikminPilot-11.5.4.13-END-USER-KIT
+            PikminPilot-Stage11.5.4.14-FULLY-SIGNED-DEVELOPMENT.ipa \
+            PikminPilot-11.5.4.14-END-USER-KIT
           /usr/bin/zip -qry \
-            PikminPilot-11.5.4.13-END-USER-KIT.zip \
-            PikminPilot-11.5.4.13-END-USER-KIT
-          unzip -t PikminPilot-11.5.4.13-END-USER-KIT.zip >/dev/null
+            PikminPilot-11.5.4.14-END-USER-KIT.zip \
+            PikminPilot-11.5.4.14-END-USER-KIT
+          unzip -t PikminPilot-11.5.4.14-END-USER-KIT.zip >/dev/null
 
       - uses: actions/upload-artifact@v4
         with:
-          name: PikminPilot-11.5.4.13-END-USER-KIT
-          path: PikminPilot-11.5.4.13-END-USER-KIT.zip
+          name: PikminPilot-11.5.4.14-END-USER-KIT
+          path: PikminPilot-11.5.4.14-END-USER-KIT.zip
 
       - uses: actions/upload-artifact@v4
         with:
-          name: PikminPilot-Stage11.5.4.13-FULLY-SIGNED-DEVELOPMENT
+          name: PikminPilot-Stage11.5.4.14-FULLY-SIGNED-DEVELOPMENT
           path: |
-            PikminPilot-Stage11.5.4.13-FULLY-SIGNED-DEVELOPMENT.ipa
-            PikminPilotRunner-Stage11.5.4.13-SIGNED.ipa
+            PikminPilot-Stage11.5.4.14-FULLY-SIGNED-DEVELOPMENT.ipa
+            PikminPilotRunner-Stage11.5.4.14-SIGNED.ipa
             PikminPilotSignedSHA256.txt
             EmbeddedRunnerSHA256.txt
             RunnerBuiltBundleIdentifier.txt
