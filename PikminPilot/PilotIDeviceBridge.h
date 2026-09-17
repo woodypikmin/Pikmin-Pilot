@@ -97,6 +97,7 @@ int32_t PPPhoneLocalSessionMountPersonalizedDDI(uintptr_t session, const char *i
 int32_t PPPhoneLocalSessionInstallRunnerIPA(uintptr_t session, const char *localIPAPath, char *message, size_t messageCapacity);
 int32_t PPPhoneLocalSessionDiscoverRunner(uintptr_t session, char *message, size_t messageCapacity);
 int32_t PPPhoneLocalSessionLaunchBundleID(uintptr_t session, const char *bundleID, char *message, size_t messageCapacity);
+int32_t PPPhoneLocalSessionTakeCoreDeviceScreenshotBounded(uintptr_t session, const char *outputPath, uint64_t timeoutMilliseconds, char *message, size_t messageCapacity);
 int32_t PPPhoneLocalSessionTakeScreenshot(uintptr_t session, const char *outputPath, char *message, size_t messageCapacity);
 int32_t PPPhoneLocalSessionTakeScreenshotBounded(uintptr_t session, const char *outputPath, uint64_t timeoutMilliseconds, char *message, size_t messageCapacity);
 int32_t PPPhoneLocalSessionXCTestActivate(uintptr_t session, char *message, size_t messageCapacity);

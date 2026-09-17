@@ -83,7 +83,7 @@ final class Stage8FullLoopController: ObservableObject {
 
         beginBackgroundWindow(label: "initial")
         let goal = self.targetDispatches.map(String.init) ?? "∞"
-        emit("STAGE 11.5.4.24 PILOT RUN START • baseline=11.5.3 • automation-core=10.3.1 • transportHost=\(host):49152 • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • Stage 8.2.2 stable loop core • WDA=OFF")
+        emit("STAGE 11.5.4.26 PILOT RUN START • baseline=11.5.3 • automation-core=10.3.1 • transportHost=\(host):49152 • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • Stage 8.2.2 stable loop core • WDA=OFF")
 
         worker = Task { [weak self] in
             guard let self else { return }
@@ -127,7 +127,7 @@ final class Stage8FullLoopController: ObservableObject {
 
         beginBackgroundWindow(label: "persistent-cellular")
         let goal = self.targetDispatches.map(String.init) ?? "∞"
-        emit("STAGE 11.5.4.24 PERSISTENT CELLULAR RUN START • automation-core=10.3.1 • transport=\(transportLabel) • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • RPPairing-reconnect=DISABLED")
+        emit("STAGE 11.5.4.26 PERSISTENT CELLULAR RUN START • automation-core=10.3.1 • transport=\(transportLabel) • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • RPPairing-reconnect=DISABLED")
 
         worker = Task { [weak self] in
             guard let self else { return }
@@ -1201,7 +1201,7 @@ final class Stage8FullLoopController: ObservableObject {
         throw LoopError("phase=post-tail-pikmin-foreground • AppService failed after \(maxAttempts) attempts • \(lastMessage)")
     }
 
-    /// Stage 11.5.4.24: a DVT timeout is a transport failure, not a UI-state
+    /// Stage 11.5.4.26: a DVT timeout is a transport failure, not a UI-state
     /// failure. 11.5.4.23 repeatedly rebuilt foreground/background windows while
     /// keeping the same persistent Adapter/RSD handshake, so a poisoned DVT path
     /// timed out again and again. Rebuild the persistent RSD session while Pilot
@@ -1329,15 +1329,20 @@ final class Stage8FullLoopController: ObservableObject {
                 // timeout when all retries share the same persistent RSD session.
                 // Escalate the first DVT failure to a transactional RSD-session
                 // rebuild, then return to Pikmin once and retry the screenshot.
-                if isIPadDevice,
-                   recoveryCount < maxRecoveries,
-                   isPostTailDVTFailure(message) {
+                if recoveryCount < maxRecoveries,
+                   (isPostTailDVTFailure(message) || message.lowercased().contains("coredevice screenshot")) {
                     recoveryCount += 1
-                    emit("ROUND \(round) • POST-TAIL DVT STALE ⚠️ • recovery=\(recoveryCount)/\(maxRecoveries) • detector not run because no image arrived • rebuilding RSD session")
-                    try await recoverIPadPostTailTransport(
+                    emit("ROUND \(round) • POST-TAIL SCREENSHOT BOTH PATHS MISSED ⚠️ • recovery=\(recoveryCount)/\(maxRecoveries) • detector not run because no image arrived • device=\(isIPadDevice ? "iPad" : "iPhone") • RSD rebuild skipped")
+                    // Both independent screenshot services missed. Do not rebuild
+                    // RSD in a tight loop: 11.5.4.24 proved AppService/RSD is alive.
+                    // Keep GO state, wait briefly, and retry from the same live
+                    // background window; re-arm only if budget/lifecycle requires it.
+                    await pause(0.45)
+                    try await ensurePostTailACKBudget(
                         engine: engine,
                         round: round,
-                        reason: "screenshot-\(recoveryCount)"
+                        reason: "screenshot-dual-retry-\(recoveryCount)",
+                        minimumRemaining: 7.0
                     )
                     continue
                 }
@@ -1416,41 +1421,27 @@ final class Stage8FullLoopController: ObservableObject {
                 }
 
                 closeTapAttempts += 1
-                if isIPadDevice {
-                    emit(String(format: "ROUND %d • POST-TAIL ACK green X visible ⚠️ • retry tap %d/%d • point=(%.4f,%.4f) • bounded-xctest=12s", round, closeTapAttempts, maxCloseTapAttempts, x, y))
-                } else {
-                    emit(String(format: "ROUND %d • POST-TAIL ACK green X visible ⚠️ • retry tap %d/%d • point=(%.4f,%.4f)", round, closeTapAttempts, maxCloseTapAttempts, x, y))
-                }
-                let tapResult: IDeviceEngine.Result
-                if isIPadDevice {
-                    tapResult = await engine.runXCTestTapBounded(
-                        normalizedX: x,
-                        normalizedY: y,
-                        timeoutSeconds: 12
-                    )
-                } else {
-                    // Preserve the proven iPhone tap path byte-for-byte.
-                    tapResult = await engine.runXCTestTap(normalizedX: x, normalizedY: y)
-                }
+                emit(String(format: "ROUND %d • POST-TAIL ACK green X visible ⚠️ • retry tap %d/%d • point=(%.4f,%.4f) • bounded-xctest=12s • universal=YES", round, closeTapAttempts, maxCloseTapAttempts, x, y))
+                let tapResult = await engine.runXCTestTapBounded(
+                    normalizedX: x,
+                    normalizedY: y,
+                    timeoutSeconds: 12
+                )
                 try checkCancelled()
 
                 if !tapResult.ok {
                     if isTransientTransportFailure(tapResult.message), recoveryCount < maxRecoveries {
                         recoveryCount += 1
                         emit("ROUND \(round) • POST-TAIL TAP transient failure ⚠️ • state reconcile instead of replay • recovery=\(recoveryCount)/\(maxRecoveries) • \(compactTransportMessage(tapResult.message))")
-                        if isIPadDevice {
-                            try await recoverIPadPostTailTransport(
-                                engine: engine,
-                                round: round,
-                                reason: "tap-\(recoveryCount)"
-                            )
-                        } else {
-                            try await preparePostTailExecutionWindow(
-                                engine: engine,
-                                round: round,
-                                reason: "tap-reconcile-\(recoveryCount)"
-                            )
-                        }
+                        // The tap may have physically happened even when its DTX
+                        // response is lost. Never replay from the error alone. Re-arm
+                        // execution and let the next CoreDevice/DVT screenshot decide
+                        // whether Green-X is still present. This policy is universal.
+                        try await preparePostTailExecutionWindow(
+                            engine: engine,
+                            round: round,
+                            reason: "tap-reconcile-\(recoveryCount)"
+                        )
                         continue
                     }
                     throw LoopError("phase=post-tail-green-x-retry-tap • \(tapResult.message)")
@@ -1808,7 +1799,7 @@ final class Stage8FullLoopController: ObservableObject {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("PikminPilot-Stage10.3-\(safeTag).png")
         let isPostTailACK = tag.hasPrefix("post-tail-green-x-ack")
-        let maxAttempts = isPostTailACK ? (isIPadDevice ? 1 : 6) : 3
+        let maxAttempts = isPostTailACK ? 2 : 3
         var lastFailure = "unknown screenshot failure"
 
         for attempt in 1...maxAttempts {
@@ -1816,12 +1807,29 @@ final class Stage8FullLoopController: ObservableObject {
             try? FileManager.default.removeItem(at: url)
 
             let result: IDeviceEngine.Result
-            if isPostTailACK && isIPadDevice {
-                emit("POST-TAIL DVT CAPTURE begin • attempt=\(attempt)/\(maxAttempts) • watchdog=4500ms • transport=persistent-session")
-                result = await engine.takeScreenshotBounded(
+            if isPostTailACK {
+                // 11.5.4.26 universal post-tail capture: iPhone field reports can
+                // show the same symptom as iPad (the game is visibly on Green-X
+                // while no screenshot reaches the detector). CoreDevice Screen
+                // Capture is therefore the primary backend on BOTH device classes;
+                // DVT is retained only as a bounded one-shot fallback. Detector
+                // policy remains device-specific and unchanged below.
+                emit("POST-TAIL SCREENSHOT begin • attempt=\(attempt)/\(maxAttempts) • primary=CoreDevice • fallback=DVT")
+                let core = await engine.takeCoreDeviceScreenshotBounded(
                     outputPath: url.path,
-                    timeoutMilliseconds: 4_500
+                    timeoutMilliseconds: 4_000
                 )
+                if core.ok {
+                    emit("POST-TAIL COREDEVICE SCREENSHOT ✅ • watchdog=4000ms")
+                    result = core
+                } else {
+                    emit("POST-TAIL COREDEVICE SCREENSHOT miss ⚠️ • trying one DVT fallback • \(compactTransportMessage(core.message))")
+                    try? FileManager.default.removeItem(at: url)
+                    result = await engine.takeScreenshotBounded(
+                        outputPath: url.path,
+                        timeoutMilliseconds: 4_000
+                    )
+                }
             } else {
                 result = await engine.takeScreenshot(outputPath: url.path)
             }

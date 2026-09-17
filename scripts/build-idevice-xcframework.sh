@@ -451,6 +451,7 @@ cp "$ROOT/RustPatch/pilot_xctest_metadata.rs" ffi/src/pilot_xctest_metadata.rs
 cp "$ROOT/RustPatch/pilot_xctest_execute.rs" ffi/src/pilot_xctest_execute.rs
 cp "$ROOT/RustPatch/pilot_runner_install.rs" ffi/src/pilot_runner_install.rs
 cp "$ROOT/RustPatch/pilot_ddi_mount.rs" ffi/src/pilot_ddi_mount.rs
+cp "$ROOT/RustPatch/pilot_coredevice_screenshot.rs" ffi/src/pilot_coredevice_screenshot.rs
 
 # Add a focused FFI-only feature under the existing [features] table.
 python3 - <<'PY'
@@ -478,6 +479,24 @@ mod pilot_xctest_metadata;
 mod pilot_xctest_execute;
 mod pilot_runner_install;
 mod pilot_ddi_mount;
+mod pilot_coredevice_screenshot;
+
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pilot_coredevice_screenshot(
+    adapter: *mut core_device_proxy::AdapterHandle,
+    handshake: *mut rsd::RsdHandshakeHandle,
+    output_path: *const std::ffi::c_char,
+    timeout_ms: u64,
+    message: *mut std::ffi::c_char,
+    message_capacity: usize,
+) -> i32 {
+    unsafe {
+        pilot_coredevice_screenshot::pilot_coredevice_screenshot_impl(
+            adapter, handshake, output_path, timeout_ms, message, message_capacity,
+        )
+    }
+}
 
 
 #[unsafe(no_mangle)]
@@ -748,6 +767,7 @@ required = [
     b"pilot_xctest_execute_tap",
     b"pilot_xctest_execute_tap_bounded",
     b"screenshot_client_take_screenshot_timeout",
+    b"pilot_coredevice_screenshot",
     b"pilot_xctest_execute_swipe",
     b"pilot_xctest_execute_select12",
     b"pilot_xctest_execute_dispatch_tail",

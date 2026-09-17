@@ -488,6 +488,29 @@ actor IDeviceEngine {
         }
     }
 
+    /// Stage 11.5.4.25: iPad post-tail screenshot through the independent
+    /// CoreDevice Screen Capture service. This bypasses the DVT Instruments
+    /// screenshot channel while reusing the proven phone-local RSD session.
+    func takeCoreDeviceScreenshotBounded(
+        outputPath: String,
+        timeoutMilliseconds: UInt64
+    ) -> Result {
+        guard persistentSession != 0 else {
+            return Result(ok: false, message: "PERSISTENT RSD SESSION MISSING")
+        }
+        return callPersistent { session, message, capacity in
+            outputPath.withCString { outputCString in
+                PPPhoneLocalSessionTakeCoreDeviceScreenshotBounded(
+                    session,
+                    outputCString,
+                    timeoutMilliseconds,
+                    message,
+                    capacity
+                )
+            }
+        }
+    }
+
     func takeScreenshot(outputPath: String) -> Result {
         if persistentSession != 0 {
             return callPersistent { session, message, capacity in

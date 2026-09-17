@@ -23,6 +23,15 @@ static BOOL PPBuildNumericSocketAddress(
 );
 
 
+extern int32_t pilot_coredevice_screenshot(
+    struct AdapterHandle *adapter,
+    struct RsdHandshakeHandle *handshake,
+    const char *output_path,
+    uint64_t timeout_ms,
+    char *message,
+    size_t message_capacity
+);
+
 extern int32_t pilot_xctest_metadata(
     struct AdapterHandle *adapter,
     struct RsdHandshakeHandle *handshake,
@@ -2225,6 +2234,29 @@ int32_t PPPhoneLocalSessionLaunchBundleID(
     PPWriteMessage(message, messageCapacity,
         [NSString stringWithFormat:@"PERSISTENT RSD BUNDLE LAUNCH SENT • %s", bundleID]);
     return 0;
+}
+
+int32_t PPPhoneLocalSessionTakeCoreDeviceScreenshotBounded(
+    uintptr_t raw,
+    const char *outputPath,
+    uint64_t timeoutMilliseconds,
+    char *message,
+    size_t messageCapacity
+) {
+    PPPhoneLocalSession *session = PPSession(raw, message, messageCapacity);
+    if (session == NULL) return -309;
+    if (outputPath == NULL || outputPath[0] == '\0') {
+        PPWriteMessage(message, messageCapacity, @"CoreDevice screenshot output path is missing");
+        return -310;
+    }
+    return pilot_coredevice_screenshot(
+        session->adapter,
+        session->handshake,
+        outputPath,
+        timeoutMilliseconds,
+        message,
+        messageCapacity
+    );
 }
 
 int32_t PPPhoneLocalSessionTakeScreenshot(
