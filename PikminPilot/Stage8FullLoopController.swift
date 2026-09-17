@@ -83,7 +83,7 @@ final class Stage8FullLoopController: ObservableObject {
 
         beginBackgroundWindow(label: "initial")
         let goal = self.targetDispatches.map(String.init) ?? "∞"
-        emit("STAGE 11.5.4.21 PILOT RUN START • baseline=11.5.3 • automation-core=10.3.1 • transportHost=\(host):49152 • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • Stage 8.2.2 stable loop core • WDA=OFF")
+        emit("STAGE 11.5.4.22 PILOT RUN START • baseline=11.5.3 • automation-core=10.3.1 • transportHost=\(host):49152 • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • Stage 8.2.2 stable loop core • WDA=OFF")
 
         worker = Task { [weak self] in
             guard let self else { return }
@@ -127,7 +127,7 @@ final class Stage8FullLoopController: ObservableObject {
 
         beginBackgroundWindow(label: "persistent-cellular")
         let goal = self.targetDispatches.map(String.init) ?? "∞"
-        emit("STAGE 11.5.4.21 PERSISTENT CELLULAR RUN START • automation-core=10.3.1 • transport=\(transportLabel) • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • RPPairing-reconnect=DISABLED")
+        emit("STAGE 11.5.4.22 PERSISTENT CELLULAR RUN START • automation-core=10.3.1 • transport=\(transportLabel) • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • RPPairing-reconnect=DISABLED")
 
         worker = Task { [weak self] in
             guard let self else { return }
@@ -1108,15 +1108,34 @@ final class Stage8FullLoopController: ObservableObject {
             )
             try checkCancelled()
 
+            // 11.5.4.22: after AppService foregrounds Pikmin there is a short
+            // UIKit accounting transition where Pilot is already backgrounded and
+            // the UIBackgroundTask is live, but backgroundTimeRemaining can still
+            // report greatestFiniteMagnitude. 11.5.4.21 interpreted that transient
+            // value as "no usable window", foregrounded Pilot again, and created
+            // the observed Pilot↔Pikmin ping-pong loop.
+            //
+            // Probe by observations rather than a 0.90s wall-clock deadline: a
+            // single Task.sleep can itself be delayed while the app transitions to
+            // background. If UIKit has not published a finite budget yet but the
+            // app reached .background and our task identifier is still live, accept
+            // the window provisionally and let the next screenshot/state check be
+            // authoritative. A real expiration will invalidate backgroundTask and
+            // set backgroundExpiredDuringCriticalTail.
             var remaining: Double?
-            let deadline = Date().addingTimeInterval(0.90)
-            while Date() < deadline {
+            var observedBackgroundState = UIApplication.shared.applicationState == .background
+            for probe in 0..<12 {
                 if backgroundExpiredDuringCriticalTail { break }
+                if UIApplication.shared.applicationState == .background {
+                    observedBackgroundState = true
+                }
                 if let value = finiteBackgroundSeconds() {
                     remaining = value
                     break
                 }
-                await pause(0.04)
+                if probe < 11 {
+                    await pause(0.06)
+                }
             }
 
             if !backgroundExpiredDuringCriticalTail,
@@ -1127,8 +1146,22 @@ final class Stage8FullLoopController: ObservableObject {
                 return
             }
 
+            // Do not bounce Pilot back to foreground merely because UIKit has not
+            // converted "unlimited" to a finite number yet. This exact state was
+            // observed in the field: the following loop iteration immediately saw
+            // ~29.9s remaining. The live task + actual background state is enough
+            // to continue into state reconciliation without replaying GO.
+            if !backgroundExpiredDuringCriticalTail,
+               remaining == nil,
+               observedBackgroundState,
+               backgroundTask != .invalid {
+                backgroundRecoveryPending = false
+                emit("ROUND \(round) • POST-TAIL WINDOW READY ✅ • reason=\(reason) • attempt=\(attempt)/\(maxAttempts) • background=pending-accounting • live-task=YES")
+                return
+            }
+
             let budget = remaining.map { String(format: "%.1fs", $0) } ?? backgroundBudgetLabel()
-            emit("ROUND \(round) • POST-TAIL WINDOW rejected ⚠️ • reason=\(reason) • attempt=\(attempt)/\(maxAttempts) • background=\(budget) • expired=\(backgroundExpiredDuringCriticalTail ? "YES" : "NO")")
+            emit("ROUND \(round) • POST-TAIL WINDOW rejected ⚠️ • reason=\(reason) • attempt=\(attempt)/\(maxAttempts) • appState=\(appStateLabel()) • background=\(budget) • live-task=\(backgroundTask != .invalid ? "YES" : "NO") • expired=\(backgroundExpiredDuringCriticalTail ? "YES" : "NO")")
         }
 
         throw LoopError("phase=post-tail-window • unable to obtain usable background execution window • reason=\(reason)")
@@ -1181,6 +1214,13 @@ final class Stage8FullLoopController: ObservableObject {
             needsRearm = true
         } else if let remaining = finiteBackgroundSeconds() {
             needsRearm = remaining < minimumRemaining
+        } else if UIApplication.shared.applicationState == .background,
+                  backgroundTask != .invalid {
+            // 11.5.4.22: UIKit can briefly leave backgroundTimeRemaining at the
+            // unlimited sentinel after AppService switches Pikmin foreground. A
+            // live UIBackgroundTask in an actual .background host is provisional
+            // execution authority; do not re-foreground Pilot and create a loop.
+            needsRearm = false
         } else {
             needsRearm = true
         }
