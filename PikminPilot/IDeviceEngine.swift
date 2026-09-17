@@ -488,9 +488,9 @@ actor IDeviceEngine {
         }
     }
 
-    /// Stage 11.5.4.25: iPad post-tail screenshot through the independent
-    /// CoreDevice Screen Capture service. This bypasses the DVT Instruments
-    /// screenshot channel while reusing the proven phone-local RSD session.
+    /// CoreDevice Screen Capture through a live phone-local RSD session.
+    /// Stage 11.5.4.27 guarantees that normal iPhone/iPad post-tail paths open
+    /// a dedicated session before calling this; cellular escape reuses its pin.
     func takeCoreDeviceScreenshotBounded(
         outputPath: String,
         timeoutMilliseconds: UInt64

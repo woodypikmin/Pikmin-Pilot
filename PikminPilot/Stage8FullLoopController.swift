@@ -45,6 +45,13 @@ final class Stage8FullLoopController: ObservableObject {
     // and this field observation so a temporarily slower device does not keep
     // starting the next tail with only a few seconds of handoff margin.
     private var observedCriticalTailSeconds: Double?
+    // 11.5.4.27: normal Wi-Fi/integrated-tunnel runs historically use
+    // per-command RSD sessions. CoreDevice Screen Capture, however, requires a
+    // live Adapter/RSD handshake. Open a dedicated persistent session only for
+    // the post-tail reconciliation window and release it after the expedition
+    // list is proven. Cellular escape already owns a pinned persistent session,
+    // so this flag stays false there and that session is never closed here.
+    private var postTailOwnsPersistentSession = false
     private var logLines: [String] = []
 
     private var statusSink: ((String) -> Void)?
@@ -69,6 +76,7 @@ final class Stage8FullLoopController: ObservableObject {
         gameplayForegroundLock = false
         backgroundRecoveryPending = false
         observedCriticalTailSeconds = nil
+        postTailOwnsPersistentSession = false
         completedDispatches = 0
         self.targetDispatches = targetDispatches.flatMap { $0 > 0 ? $0 : nil }
         self.pikminType = pikminType
@@ -83,7 +91,7 @@ final class Stage8FullLoopController: ObservableObject {
 
         beginBackgroundWindow(label: "initial")
         let goal = self.targetDispatches.map(String.init) ?? "∞"
-        emit("STAGE 11.5.4.26 PILOT RUN START • baseline=11.5.3 • automation-core=10.3.1 • transportHost=\(host):49152 • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • Stage 8.2.2 stable loop core • WDA=OFF")
+        emit("STAGE 11.5.4.27 PILOT RUN START • baseline=11.5.3 • automation-core=10.3.1 • transportHost=\(host):49152 • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • Stage 8.2.2 stable loop core • WDA=OFF")
 
         worker = Task { [weak self] in
             guard let self else { return }
@@ -113,6 +121,7 @@ final class Stage8FullLoopController: ObservableObject {
         gameplayForegroundLock = false
         backgroundRecoveryPending = false
         observedCriticalTailSeconds = nil
+        postTailOwnsPersistentSession = false
         completedDispatches = 0
         self.targetDispatches = targetDispatches.flatMap { $0 > 0 ? $0 : nil }
         self.pikminType = pikminType
@@ -127,7 +136,7 @@ final class Stage8FullLoopController: ObservableObject {
 
         beginBackgroundWindow(label: "persistent-cellular")
         let goal = self.targetDispatches.map(String.init) ?? "∞"
-        emit("STAGE 11.5.4.26 PERSISTENT CELLULAR RUN START • automation-core=10.3.1 • transport=\(transportLabel) • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • RPPairing-reconnect=DISABLED")
+        emit("STAGE 11.5.4.27 PERSISTENT CELLULAR RUN START • automation-core=10.3.1 • transport=\(transportLabel) • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • RPPairing-reconnect=DISABLED")
 
         worker = Task { [weak self] in
             guard let self else { return }
@@ -1061,6 +1070,40 @@ final class Stage8FullLoopController: ObservableObject {
         throw LoopError("phase=\(context)-pilot-foreground • AppService could not restore Pilot foreground after \(maxAttempts) attempts • \(lastMessage)")
     }
 
+    /// 11.5.4.27: CoreDevice Screen Capture requires a live persistent
+    /// Adapter/RSD handshake. Normal Wi-Fi/integrated-tunnel runs did not open
+    /// one in 11.5.4.25/26, which made every CoreDevice attempt fail immediately
+    /// with "PERSISTENT RSD SESSION MISSING" and silently forced the run back
+    /// onto the flaky DVT fallback. Open a dedicated session while Pilot is
+    /// authoritative foreground, before consuming any finite background budget.
+    private func ensurePostTailCaptureSession(
+        engine: IDeviceEngine,
+        round: Int,
+        reason: String
+    ) async {
+        if await engine.hasPersistentSession() { return }
+
+        emit("ROUND \(round) • POST-TAIL CAPTURE SESSION open • reason=\(reason) • dedicated=YES")
+        let opened = await engine.openPersistentSession()
+        if opened.ok {
+            postTailOwnsPersistentSession = true
+            emit("ROUND \(round) • POST-TAIL CAPTURE SESSION READY ✅ • CoreDevice=ENABLED • dedicated=YES")
+        } else {
+            emit("ROUND \(round) • POST-TAIL CAPTURE SESSION miss ⚠️ • CoreDevice unavailable for this attempt • bounded DVT fallback remains • \(compactTransportMessage(opened.message))")
+        }
+    }
+
+    private func releaseDedicatedPostTailCaptureSession(
+        engine: IDeviceEngine,
+        round: Int,
+        reason: String
+    ) async {
+        guard postTailOwnsPersistentSession else { return }
+        await engine.closePersistentSession()
+        postTailOwnsPersistentSession = false
+        emit("ROUND \(round) • POST-TAIL CAPTURE SESSION released ✅ • reason=\(reason) • baseline transport restored")
+    }
+
     /// Re-arm the only background window used by the host-side post-tail ACK.
     /// If iOS grants an unusably short window, return Pilot to foreground and
     /// try again instead of entering DVT/XCTest work that is likely to suspend.
@@ -1097,6 +1140,11 @@ final class Stage8FullLoopController: ObservableObject {
                 emit("ROUND \(round) • POST-TAIL WINDOW foreground unstable ⚠️ • reason=\(reason) • attempt=\(attempt)/\(maxAttempts)")
                 continue
             }
+
+            // CoreDevice must have its RSD session before Pikmin takes foreground.
+            // Session creation is intentionally done while Pilot has unlimited
+            // foreground execution time, never inside the ~30s background lease.
+            await ensurePostTailCaptureSession(engine: engine, round: round, reason: reason)
 
             backgroundExpiredDuringCriticalTail = false
             beginBackgroundWindow(label: "post-tail-r\(round)-\(reason)-a\(attempt)")
@@ -1201,7 +1249,7 @@ final class Stage8FullLoopController: ObservableObject {
         throw LoopError("phase=post-tail-pikmin-foreground • AppService failed after \(maxAttempts) attempts • \(lastMessage)")
     }
 
-    /// Stage 11.5.4.26: a DVT timeout is a transport failure, not a UI-state
+    /// Stage 11.5.4.27: a DVT timeout is a transport failure, not a UI-state
     /// failure. 11.5.4.23 repeatedly rebuilt foreground/background windows while
     /// keeping the same persistent Adapter/RSD handshake, so a poisoned DVT path
     /// timed out again and again. Rebuild the persistent RSD session while Pilot
@@ -1332,18 +1380,37 @@ final class Stage8FullLoopController: ObservableObject {
                 if recoveryCount < maxRecoveries,
                    (isPostTailDVTFailure(message) || message.lowercased().contains("coredevice screenshot")) {
                     recoveryCount += 1
-                    emit("ROUND \(round) • POST-TAIL SCREENSHOT BOTH PATHS MISSED ⚠️ • recovery=\(recoveryCount)/\(maxRecoveries) • detector not run because no image arrived • device=\(isIPadDevice ? "iPad" : "iPhone") • RSD rebuild skipped")
-                    // Both independent screenshot services missed. Do not rebuild
-                    // RSD in a tight loop: 11.5.4.24 proved AppService/RSD is alive.
-                    // Keep GO state, wait briefly, and retry from the same live
-                    // background window; re-arm only if budget/lifecycle requires it.
-                    await pause(0.45)
-                    try await ensurePostTailACKBudget(
-                        engine: engine,
-                        round: round,
-                        reason: "screenshot-dual-retry-\(recoveryCount)",
-                        minimumRemaining: 7.0
-                    )
+                    emit("ROUND \(round) • POST-TAIL SCREENSHOT BOTH PATHS MISSED ⚠️ • recovery=\(recoveryCount)/\(maxRecoveries) • detector not run because no image arrived • device=\(isIPadDevice ? "iPad" : "iPhone")")
+
+                    if postTailOwnsPersistentSession {
+                        // This session was created only for post-tail work, so it is
+                        // safe to retire it after BOTH CoreDevice and DVT miss. The
+                        // next window will open a brand-new Adapter/RSD handshake
+                        // while Pilot is foreground. Never do this to the cellular
+                        // escape session, which is not owned by this helper.
+                        emit("ROUND \(round) • POST-TAIL CAPTURE SESSION stale ⚠️ • recycling dedicated RSD before retry")
+                        await releaseDedicatedPostTailCaptureSession(
+                            engine: engine,
+                            round: round,
+                            reason: "dual-screenshot-miss-\(recoveryCount)"
+                        )
+                        try await preparePostTailExecutionWindow(
+                            engine: engine,
+                            round: round,
+                            reason: "screenshot-session-retry-\(recoveryCount)"
+                        )
+                    } else {
+                        // Cellular escape owns a pinned RSD session that may not be
+                        // reconnectable after 4G/5G restore. Preserve it and retry
+                        // within the same transport generation.
+                        await pause(0.45)
+                        try await ensurePostTailACKBudget(
+                            engine: engine,
+                            round: round,
+                            reason: "screenshot-dual-retry-\(recoveryCount)",
+                            minimumRemaining: 7.0
+                        )
+                    }
                     continue
                 }
 
@@ -1456,6 +1523,11 @@ final class Stage8FullLoopController: ObservableObject {
                 listReadyStreak += 1
                 if listReadyStreak >= 2 {
                     emit("ROUND \(round) • POST-TAIL ACK list confirmed on 2 consecutive frames • retryTaps=\(closeTapAttempts) • recoveries=\(recoveryCount)")
+                    await releaseDedicatedPostTailCaptureSession(
+                        engine: engine,
+                        round: round,
+                        reason: "list-confirmed"
+                    )
                     return
                 }
             } else {
@@ -1808,7 +1880,7 @@ final class Stage8FullLoopController: ObservableObject {
 
             let result: IDeviceEngine.Result
             if isPostTailACK {
-                // 11.5.4.26 universal post-tail capture: iPhone field reports can
+                // 11.5.4.27 universal post-tail capture: iPhone field reports can
                 // show the same symptom as iPad (the game is visibly on Green-X
                 // while no screenshot reaches the detector). CoreDevice Screen
                 // Capture is therefore the primary backend on BOTH device classes;
