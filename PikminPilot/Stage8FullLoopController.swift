@@ -45,7 +45,7 @@ final class Stage8FullLoopController: ObservableObject {
     // and this field observation so a temporarily slower device does not keep
     // starting the next tail with only a few seconds of handoff margin.
     private var observedCriticalTailSeconds: Double?
-    // 11.5.4.27: normal Wi-Fi/integrated-tunnel runs historically use
+    // 11.5.4.28: normal Wi-Fi/integrated-tunnel runs historically use
     // per-command RSD sessions. CoreDevice Screen Capture, however, requires a
     // live Adapter/RSD handshake. Open a dedicated persistent session only for
     // the post-tail reconciliation window and release it after the expedition
@@ -91,7 +91,7 @@ final class Stage8FullLoopController: ObservableObject {
 
         beginBackgroundWindow(label: "initial")
         let goal = self.targetDispatches.map(String.init) ?? "∞"
-        emit("STAGE 11.5.4.27 PILOT RUN START • baseline=11.5.3 • automation-core=10.3.1 • transportHost=\(host):49152 • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • Stage 8.2.2 stable loop core • WDA=OFF")
+        emit("STAGE 11.5.4.28 PILOT RUN START • baseline=11.5.3 • automation-core=10.3.1 • transportHost=\(host):49152 • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • Stage 8.2.2 stable loop core • WDA=OFF")
 
         worker = Task { [weak self] in
             guard let self else { return }
@@ -136,7 +136,7 @@ final class Stage8FullLoopController: ObservableObject {
 
         beginBackgroundWindow(label: "persistent-cellular")
         let goal = self.targetDispatches.map(String.init) ?? "∞"
-        emit("STAGE 11.5.4.27 PERSISTENT CELLULAR RUN START • automation-core=10.3.1 • transport=\(transportLabel) • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • RPPairing-reconnect=DISABLED")
+        emit("STAGE 11.5.4.28 PERSISTENT CELLULAR RUN START • automation-core=10.3.1 • transport=\(transportLabel) • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • RPPairing-reconnect=DISABLED")
 
         worker = Task { [weak self] in
             guard let self else { return }
@@ -337,20 +337,16 @@ final class Stage8FullLoopController: ObservableObject {
 
                 if cancelled { break }
 
-                setPhase("回到探險列表")
-                // The post-tail GREEN-X DOUBLE-ACK already proved the list on
-                // two consecutive live frames. Keep this legacy list check only
-                // as a soft sanity probe; a transient detector miss must never
-                // terminate a finite target halfway through.
-                if !(try await waitForExpeditionList(engine: engine, attempts: 8)) {
-                    emit("ROUND \(round) • LIST SOFT-MISS after verified green-X close • keeping target latch alive")
-                    try await foregroundPikminContinuously(
-                        engine: engine,
-                        stage: "list-soft-recovery-reactivate",
-                        round: round
-                    )
-                    await pause(fastMode ? 0.40 : 0.70)
-                }
+                // 11.5.4.28 FAST INTER-ROUND: runOneDispatch() only returns
+                // after the post-tail Green-X verifier has seen the Expedition
+                // list on TWO consecutive live frames. Re-running the legacy
+                // waitForExpeditionList() here performs an extra screenshot +
+                // FruitDetector pass after the list is already proven and is the
+                // visible pause between rounds. Trust the verified post-tail
+                // checkpoint and let the next round's normal fresh scan be the
+                // next capture.
+                setPhase("準備下一輪")
+                emit("ROUND \(round) • INTER-ROUND FAST-PATH ✅ • verified list checkpoint reused • redundant list recheck skipped")
 
                 if stopAfterCurrentRequested {
                     stopCause = .userAfterCurrent
@@ -369,7 +365,7 @@ final class Stage8FullLoopController: ObservableObject {
                 }
 
                 if cancelled { break }
-                await pause(fastMode ? 0.10 : 0.20)
+                await pause(fastMode ? 0.02 : 0.05)
             }
 
             setPhase(stopCause == .userImmediate ? "已立即停止" : "已停止")
@@ -1070,7 +1066,7 @@ final class Stage8FullLoopController: ObservableObject {
         throw LoopError("phase=\(context)-pilot-foreground • AppService could not restore Pilot foreground after \(maxAttempts) attempts • \(lastMessage)")
     }
 
-    /// 11.5.4.27: CoreDevice Screen Capture requires a live persistent
+    /// 11.5.4.28: CoreDevice Screen Capture requires a live persistent
     /// Adapter/RSD handshake. Normal Wi-Fi/integrated-tunnel runs did not open
     /// one in 11.5.4.25/26, which made every CoreDevice attempt fail immediately
     /// with "PERSISTENT RSD SESSION MISSING" and silently forced the run back
@@ -1249,7 +1245,7 @@ final class Stage8FullLoopController: ObservableObject {
         throw LoopError("phase=post-tail-pikmin-foreground • AppService failed after \(maxAttempts) attempts • \(lastMessage)")
     }
 
-    /// Stage 11.5.4.27: a DVT timeout is a transport failure, not a UI-state
+    /// Stage 11.5.4.28: a DVT timeout is a transport failure, not a UI-state
     /// failure. 11.5.4.23 repeatedly rebuilt foreground/background windows while
     /// keeping the same persistent Adapter/RSD handshake, so a poisoned DVT path
     /// timed out again and again. Rebuild the persistent RSD session while Pilot
@@ -1880,7 +1876,7 @@ final class Stage8FullLoopController: ObservableObject {
 
             let result: IDeviceEngine.Result
             if isPostTailACK {
-                // 11.5.4.27 universal post-tail capture: iPhone field reports can
+                // 11.5.4.28 universal post-tail capture: iPhone field reports can
                 // show the same symptom as iPad (the game is visibly on Green-X
                 // while no screenshot reaches the detector). CoreDevice Screen
                 // Capture is therefore the primary backend on BOTH device classes;
