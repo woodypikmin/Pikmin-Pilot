@@ -58,6 +58,45 @@ actor IDeviceEngine {
         persistentSession = 0
     }
 
+    /// Stage 11.5.4.24: create a brand-new RPPairing/RSD session first and only
+    /// swap it in after creation succeeds. This lets the iPad post-tail recovery
+    /// discard a poisoned DVT/RSD transport without risking the still-live old
+    /// session when a fresh :49152 connection is temporarily unavailable.
+    /// Existing iPhone paths never call this method.
+    func refreshPersistentSessionTransactionally() -> Result {
+        let capacity = 8192
+        let buffer = UnsafeMutablePointer<CChar>.allocate(capacity: capacity)
+        buffer.initialize(repeating: 0, count: capacity)
+        defer { buffer.deallocate() }
+
+        let newHandle: UInt = pairingPath.withCString { path in
+            host.withCString { hostCString in
+                PPPhoneLocalSessionCreate(path, hostCString, port, buffer, capacity)
+            }
+        }
+        let text = String(cString: buffer)
+        guard newHandle != 0 else {
+            return Result(
+                ok: false,
+                message: text.isEmpty
+                    ? "transactional persistent-session refresh failed; old session preserved"
+                    : "\(text) • old session preserved"
+            )
+        }
+
+        let oldHandle = persistentSession
+        persistentSession = newHandle
+        if oldHandle != 0 {
+            PPPhoneLocalSessionFree(oldHandle)
+        }
+        return Result(
+            ok: true,
+            message: text.isEmpty
+                ? "PERSISTENT RSD SESSION REBUILT ✅"
+                : "\(text) • previous session retired"
+        )
+    }
+
     func hasPersistentSession() -> Bool {
         persistentSession != 0
     }
