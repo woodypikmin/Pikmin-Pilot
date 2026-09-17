@@ -1,0 +1,26 @@
+PIKMIN PILOT 11.5.4.12 — ADMIN SIGNING CHECKLIST
+
+CURRENT VERIFIED SIGNING MODEL
+- Host app: registered-device Apple Development profile
+- PacketTunnel extension: matching registered-device profile with packet-tunnel-provider entitlement
+- XCUITest Runner: matching registered-device profile
+- Host/Tunnel CURRENT_PROJECT_VERSION: 1158
+- Runner CURRENT_PROJECT_VERSION: 1153
+- Runner revision: 1153-xfix
+
+BEFORE BUILDING FOR A NEW IPHONE
+1. Collect the iPhone UDID.
+2. Register the device in the Apple Developer account.
+3. Ensure the SAME device is included in all profiles used by:
+   - com.woodypikmin.pikminpilot
+   - com.woodypikmin.pikminpilot.tunnel
+   - com.woodypikmin.pikminpilot.runner.xctrunner
+4. Replace the GitHub profile secrets if the profiles were regenerated.
+5. For a GENERIC release, leave PAIRING_RECORD_B64 empty.
+6. For a PERSONALIZED one-device release, set PAIRING_RECORD_B64 to that device's rp_pairing_file.plist encoded as Base64.
+7. Run .github/workflows/build-ios.yml.
+8. Give the user ONLY the END-USER-KIT artifact, not the signing report/profiles/source package.
+
+SECURITY
+- Never ship .p12 files, provisioning source files, GitHub secrets, or the raw PAIRING_RECORD_B64 text.
+- A personalized pairing record is device-specific. Do not reuse it for another device.
