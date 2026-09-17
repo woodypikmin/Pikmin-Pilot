@@ -214,6 +214,39 @@ actor IDeviceEngine {
         }
     }
 
+    func runXCTestTapBounded(
+        normalizedX: Double,
+        normalizedY: Double,
+        timeoutSeconds: UInt64
+    ) -> Result {
+        if persistentSession != 0 {
+            return callPersistent { session, message, capacity in
+                PPPhoneLocalSessionXCTestTapBounded(
+                    session,
+                    normalizedX,
+                    normalizedY,
+                    timeoutSeconds,
+                    message,
+                    capacity
+                )
+            }
+        }
+        return callBridge { path, message, capacity in
+            host.withCString { hostCString in
+                PPRunPhoneLocalXCTestTapBounded(
+                    path,
+                    hostCString,
+                    port,
+                    normalizedX,
+                    normalizedY,
+                    timeoutSeconds,
+                    message,
+                    capacity
+                )
+            }
+        }
+    }
+
     func runXCTestSwipe(
         fromX: Double,
         fromY: Double,
@@ -432,6 +465,40 @@ actor IDeviceEngine {
                         hostCString,
                         port,
                         outputCString,
+                        message,
+                        capacity
+                    )
+                }
+            }
+        }
+    }
+
+    func takeScreenshotBounded(
+        outputPath: String,
+        timeoutMilliseconds: UInt64
+    ) -> Result {
+        if persistentSession != 0 {
+            return callPersistent { session, message, capacity in
+                outputPath.withCString { outputCString in
+                    PPPhoneLocalSessionTakeScreenshotBounded(
+                        session,
+                        outputCString,
+                        timeoutMilliseconds,
+                        message,
+                        capacity
+                    )
+                }
+            }
+        }
+        return callBridge { path, message, capacity in
+            host.withCString { hostCString in
+                outputPath.withCString { outputCString in
+                    PPTakePhoneScreenshotBounded(
+                        path,
+                        hostCString,
+                        port,
+                        outputCString,
+                        timeoutMilliseconds,
                         message,
                         capacity
                     )

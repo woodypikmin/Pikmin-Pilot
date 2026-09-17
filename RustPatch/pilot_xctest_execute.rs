@@ -39,6 +39,7 @@ async fn run_command(
     duration: f64,
     pink_count: i32,
     fast_mode: i32,
+    timeout_secs: u64,
 ) -> Result<String, String> {
     let mut inst = InstallationProxyClient::connect_rsd(adapter_ref, handshake_ref)
         .await
@@ -137,7 +138,7 @@ async fn run_command(
         handshake_ref,
         cfg,
         26,
-        Some(Duration::from_secs(60)),
+        Some(Duration::from_secs(timeout_secs.max(1))),
     )
     .await?;
 
@@ -159,6 +160,7 @@ unsafe fn execute_command_impl(
     duration: f64,
     pink_count: i32,
     fast_mode: i32,
+    timeout_secs: u64,
     message: *mut c_char,
     message_capacity: usize,
 ) -> i32 {
@@ -188,7 +190,7 @@ unsafe fn execute_command_impl(
     let result: Result<String, String> = run_sync_local(async move {
         let adapter_ref = unsafe { &mut (*adapter).0 };
         let handshake_ref = unsafe { &mut (*handshake).0 };
-        run_command(
+        let command_future = run_command(
             adapter_ref,
             handshake_ref,
             command,
@@ -199,8 +201,24 @@ unsafe fn execute_command_impl(
             duration,
             pink_count,
             fast_mode,
-        )
-        .await
+            timeout_secs,
+        );
+
+        // Existing commands keep their historical 60s execute-plan behavior.
+        // The dedicated post-tail bounded tap uses a shorter timeout and must
+        // bound the *whole* XCTest command, including DTX setup, so a stale
+        // channel cannot consume the entire UIKit background lease before the
+        // host gets a chance to reconcile live game state.
+        if timeout_secs < 60 {
+            match tokio::time::timeout(Duration::from_secs(timeout_secs), command_future).await {
+                Ok(inner) => inner,
+                Err(_) => Err(format!(
+                    "step=bounded-command • XcTestTimeout({timeout_secs}s)"
+                )),
+            }
+        } else {
+            command_future.await
+        }
     });
 
     match result {
@@ -230,6 +248,7 @@ pub(crate) unsafe fn pilot_xctest_execute_center_tap_impl(
             adapter, handshake, "center",
             0.5, 0.5, 0.5, 0.5, 0.0,
             12, 0,
+            60,
             message, message_capacity,
         )
     }
@@ -246,6 +265,7 @@ pub(crate) unsafe fn pilot_xctest_execute_activate_impl(
             adapter, handshake, "activate",
             0.5, 0.5, 0.5, 0.5, 0.0,
             12, 0,
+            60,
             message, message_capacity,
         )
     }
@@ -264,6 +284,27 @@ pub(crate) unsafe fn pilot_xctest_execute_tap_impl(
             adapter, handshake, "tap",
             x, y, x, y, 0.0,
             12, 0,
+            60,
+            message, message_capacity,
+        )
+    }
+}
+
+pub(crate) unsafe fn pilot_xctest_execute_tap_bounded_impl(
+    adapter: *mut AdapterHandle,
+    handshake: *mut RsdHandshakeHandle,
+    x: f64,
+    y: f64,
+    timeout_secs: u64,
+    message: *mut c_char,
+    message_capacity: usize,
+) -> i32 {
+    unsafe {
+        execute_command_impl(
+            adapter, handshake, "tap",
+            x, y, x, y, 0.0,
+            12, 0,
+            timeout_secs.clamp(4, 20),
             message, message_capacity,
         )
     }
@@ -285,6 +326,7 @@ pub(crate) unsafe fn pilot_xctest_execute_swipe_impl(
             adapter, handshake, "swipe",
             from_x, from_y, to_x, to_y, duration,
             12, 0,
+            60,
             message, message_capacity,
         )
     }
@@ -301,6 +343,7 @@ pub(crate) unsafe fn pilot_xctest_execute_select12_impl(
             adapter, handshake, "select12",
             0.5, 0.5, 0.5, 0.5, 0.0,
             12, 0,
+            60,
             message, message_capacity,
         )
     }
@@ -321,6 +364,7 @@ pub(crate) unsafe fn pilot_xctest_execute_dispatch_tail_impl(
             adapter, handshake, "dispatchtail",
             pink_x, pink_y, pink_x, pink_y, 0.0,
             pink_count, fast_mode,
+            60,
             message, message_capacity,
         )
     }

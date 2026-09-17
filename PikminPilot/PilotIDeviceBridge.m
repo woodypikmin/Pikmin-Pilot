@@ -1405,6 +1405,153 @@ int32_t PPTakePhoneScreenshot(
 }
 
 
+int32_t PPTakePhoneScreenshotBounded(
+    const char *pairingPath,
+    const char *host,
+    uint16_t port,
+    const char *outputPath,
+    uint64_t timeoutMilliseconds,
+    char *message,
+    size_t messageCapacity
+) {
+    if (outputPath == NULL || outputPath[0] == '\0') {
+        PPWriteMessage(message, messageCapacity, @"Screenshot output path is missing");
+        return -30;
+    }
+
+    struct AdapterHandle *adapter = NULL;
+    struct RsdHandshakeHandle *handshake = NULL;
+
+    int32_t tunnelResult =
+        PPCreateTunnel(
+            pairingPath,
+            host,
+            port,
+            &adapter,
+            &handshake,
+            message,
+            messageCapacity
+        );
+
+    if (tunnelResult != 0) {
+        return tunnelResult;
+    }
+
+    // iOS 17+ developer screenshot path:
+    // RSD -> com.apple.instruments.dtservicehub -> DVT screenshot channel.
+    // Do not use classic Screenshotr here; that service may not be advertised
+    // on modern RSD transports and produced "service not found" on iOS 26.6.1.
+    struct RemoteServerHandle *remoteServer = NULL;
+    struct IdeviceFfiError *remoteError =
+        remote_server_connect_rsd(adapter, handshake, &remoteServer);
+
+    if (remoteError != NULL) {
+        rsd_handshake_free(handshake);
+        adapter_free(adapter);
+        return PPConsumeError(
+            remoteError,
+            message,
+            messageCapacity,
+            @"DVT RemoteServer connect failed"
+        );
+    }
+
+    if (remoteServer == NULL) {
+        rsd_handshake_free(handshake);
+        adapter_free(adapter);
+        PPWriteMessage(message, messageCapacity, @"DVT RemoteServer returned NULL");
+        return -31;
+    }
+
+    struct ScreenshotClientHandle *client = NULL;
+    struct IdeviceFfiError *clientError =
+        screenshot_client_new(remoteServer, &client);
+
+    if (clientError != NULL) {
+        remote_server_free(remoteServer);
+        rsd_handshake_free(handshake);
+        adapter_free(adapter);
+        return PPConsumeError(
+            clientError,
+            message,
+            messageCapacity,
+            @"DVT Screenshot channel failed"
+        );
+    }
+
+    if (client == NULL) {
+        remote_server_free(remoteServer);
+        rsd_handshake_free(handshake);
+        adapter_free(adapter);
+        PPWriteMessage(message, messageCapacity, @"DVT Screenshot returned NULL client");
+        return -32;
+    }
+
+    uint8_t *imageBytes = NULL;
+    uintptr_t imageLength = 0;
+    struct IdeviceFfiError *shotError =
+        screenshot_client_take_screenshot_timeout(client, &imageBytes, &imageLength, timeoutMilliseconds);
+
+    if (shotError != NULL) {
+        screenshot_client_free(client);
+        remote_server_free(remoteServer);
+        rsd_handshake_free(handshake);
+        adapter_free(adapter);
+        return PPConsumeError(
+            shotError,
+            message,
+            messageCapacity,
+            @"DVT Screenshot failed"
+        );
+    }
+
+    if (imageBytes == NULL || imageLength == 0) {
+        if (imageBytes != NULL) {
+            idevice_data_free(imageBytes, imageLength);
+        }
+        screenshot_client_free(client);
+        remote_server_free(remoteServer);
+        rsd_handshake_free(handshake);
+        adapter_free(adapter);
+        PPWriteMessage(message, messageCapacity, @"DVT Screenshot returned empty data");
+        return -33;
+    }
+
+    NSData *imageData =
+        [NSData dataWithBytes:imageBytes length:(NSUInteger)imageLength];
+    NSString *path = [NSString stringWithUTF8String:outputPath];
+    NSError *writeError = nil;
+    BOOL wrote = [imageData writeToFile:path options:NSDataWritingAtomic error:&writeError];
+    uintptr_t byteCount = imageLength;
+
+    idevice_data_free(imageBytes, imageLength);
+    screenshot_client_free(client);
+    remote_server_free(remoteServer);
+    rsd_handshake_free(handshake);
+    adapter_free(adapter);
+
+    if (!wrote) {
+        NSString *detail = writeError.localizedDescription ?: @"unknown file write error";
+        PPWriteMessage(
+            message,
+            messageCapacity,
+            [NSString stringWithFormat:@"DVT Screenshot save failed: %@", detail]
+        );
+        return -34;
+    }
+
+    PPWriteMessage(
+        message,
+        messageCapacity,
+        [NSString stringWithFormat:
+         @"PHONE-LOCAL BOUNDED DVT SCREENSHOT OK • %llu bytes",
+         (unsigned long long)byteCount]
+    );
+
+    return 0;
+}
+
+
 int32_t PPProbePhoneLocalXCTestServices(
     const char *pairingPath,
     const char *host,
@@ -1778,6 +1925,41 @@ int32_t PPRunPhoneLocalXCTestTap(
     return result;
 }
 
+int32_t PPRunPhoneLocalXCTestTapBounded(
+    const char *pairingPath,
+    const char *host,
+    uint16_t port,
+    double normalizedX,
+    double normalizedY,
+    uint64_t timeoutSeconds,
+    char *message,
+    size_t messageCapacity
+) {
+    struct AdapterHandle *adapter = NULL;
+    struct RsdHandshakeHandle *handshake = NULL;
+
+    int32_t tunnelResult = PPCreateTunnel(
+        pairingPath, host, port, &adapter, &handshake, message, messageCapacity
+    );
+    if (tunnelResult != 0) {
+        return tunnelResult;
+    }
+
+    int32_t result = pilot_xctest_execute_tap_bounded(
+        adapter,
+        handshake,
+        normalizedX,
+        normalizedY,
+        timeoutSeconds,
+        message,
+        messageCapacity
+    );
+
+    rsd_handshake_free(handshake);
+    adapter_free(adapter);
+    return result;
+}
+
 int32_t PPRunPhoneLocalXCTestSwipe(
     const char *pairingPath,
     const char *host,
@@ -2121,6 +2303,88 @@ int32_t PPPhoneLocalSessionTakeScreenshot(
     return 0;
 }
 
+int32_t PPPhoneLocalSessionTakeScreenshotBounded(
+    uintptr_t raw,
+    const char *outputPath,
+    uint64_t timeoutMilliseconds,
+    char *message,
+    size_t messageCapacity
+) {
+    PPPhoneLocalSession *session = PPSession(raw, message, messageCapacity);
+    if (session == NULL) return -270;
+    if (outputPath == NULL || outputPath[0] == '\0') {
+        PPWriteMessage(message, messageCapacity, @"Bounded screenshot output path is missing");
+        return -271;
+    }
+
+    struct RemoteServerHandle *remoteServer = NULL;
+    struct IdeviceFfiError *remoteError =
+        remote_server_connect_rsd(session->adapter, session->handshake, &remoteServer);
+    if (remoteError != NULL) {
+        return PPConsumeError(remoteError, message, messageCapacity,
+                              @"Bounded DVT RemoteServer connect failed");
+    }
+    if (remoteServer == NULL) {
+        PPWriteMessage(message, messageCapacity, @"Bounded DVT RemoteServer returned NULL");
+        return -272;
+    }
+
+    struct ScreenshotClientHandle *client = NULL;
+    struct IdeviceFfiError *clientError = screenshot_client_new(remoteServer, &client);
+    if (clientError != NULL) {
+        remote_server_free(remoteServer);
+        return PPConsumeError(clientError, message, messageCapacity,
+                              @"Bounded DVT Screenshot channel failed");
+    }
+    if (client == NULL) {
+        remote_server_free(remoteServer);
+        PPWriteMessage(message, messageCapacity, @"Bounded DVT Screenshot returned NULL client");
+        return -273;
+    }
+
+    uint8_t *imageBytes = NULL;
+    uintptr_t imageLength = 0;
+    struct IdeviceFfiError *shotError = screenshot_client_take_screenshot_timeout(
+        client,
+        &imageBytes,
+        &imageLength,
+        timeoutMilliseconds
+    );
+    if (shotError != NULL) {
+        screenshot_client_free(client);
+        remote_server_free(remoteServer);
+        return PPConsumeError(shotError, message, messageCapacity,
+                              @"Bounded DVT Screenshot failed");
+    }
+    if (imageBytes == NULL || imageLength == 0) {
+        if (imageBytes != NULL) idevice_data_free(imageBytes, imageLength);
+        screenshot_client_free(client);
+        remote_server_free(remoteServer);
+        PPWriteMessage(message, messageCapacity, @"Bounded DVT Screenshot returned empty data");
+        return -274;
+    }
+
+    NSData *imageData = [NSData dataWithBytes:imageBytes length:(NSUInteger)imageLength];
+    NSString *path = [NSString stringWithUTF8String:outputPath];
+    NSError *writeError = nil;
+    BOOL wrote = [imageData writeToFile:path options:NSDataWritingAtomic error:&writeError];
+    uintptr_t byteCount = imageLength;
+    idevice_data_free(imageBytes, imageLength);
+    screenshot_client_free(client);
+    remote_server_free(remoteServer);
+    if (!wrote) {
+        PPWriteMessage(message, messageCapacity,
+            [NSString stringWithFormat:@"Bounded screenshot save failed: %@",
+             writeError.localizedDescription ?: @"unknown file write error"]);
+        return -275;
+    }
+    PPWriteMessage(message, messageCapacity,
+        [NSString stringWithFormat:@"BOUNDED DVT SCREENSHOT OK • %llu bytes • timeout=%llums",
+         (unsigned long long)byteCount,
+         (unsigned long long)timeoutMilliseconds]);
+    return 0;
+}
+
 int32_t PPPhoneLocalSessionXCTestActivate(uintptr_t raw, char *message, size_t messageCapacity) {
     PPPhoneLocalSession *session = PPSession(raw, message, messageCapacity);
     if (session == NULL) return -255;
@@ -2141,6 +2405,27 @@ int32_t PPPhoneLocalSessionXCTestTap(
     return pilot_xctest_execute_tap(
         session->adapter, session->handshake,
         normalizedX, normalizedY, message, messageCapacity
+    );
+}
+
+int32_t PPPhoneLocalSessionXCTestTapBounded(
+    uintptr_t raw,
+    double normalizedX,
+    double normalizedY,
+    uint64_t timeoutSeconds,
+    char *message,
+    size_t messageCapacity
+) {
+    PPPhoneLocalSession *session = PPSession(raw, message, messageCapacity);
+    if (session == NULL) return -276;
+    return pilot_xctest_execute_tap_bounded(
+        session->adapter,
+        session->handshake,
+        normalizedX,
+        normalizedY,
+        timeoutSeconds,
+        message,
+        messageCapacity
     );
 }
 

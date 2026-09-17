@@ -54,8 +54,8 @@ targets:
         - -lc++
         - -lz
         CODE_SIGN_STYLE: Manual
-        CURRENT_PROJECT_VERSION: '1162'
-        MARKETING_VERSION: '11.5.4.22'
+        CURRENT_PROJECT_VERSION: '1163'
+        MARKETING_VERSION: '11.5.4.23'
     scheme:
       testTargets:
       - PikminPilotRunnerUITests
@@ -79,8 +79,8 @@ targets:
         SKIP_INSTALL: YES
         APPLICATION_EXTENSION_API_ONLY: YES
         CODE_SIGN_STYLE: Manual
-        CURRENT_PROJECT_VERSION: '1162'
-        MARKETING_VERSION: '11.5.4.22'
+        CURRENT_PROJECT_VERSION: '1163'
+        MARKETING_VERSION: '11.5.4.23'
   PikminPilotRunnerUITests:
     type: bundle.ui-testing
     platform: iOS
@@ -97,4 +97,4 @@ targets:
         GENERATE_INFOPLIST_FILE: true
         CODE_SIGN_STYLE: Automatic
         CURRENT_PROJECT_VERSION: '1153'
-        MARKETING_VERSION: '11.5.4.22'
+        MARKETING_VERSION: '11.5.4.23'

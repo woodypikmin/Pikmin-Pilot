@@ -98,8 +98,10 @@ int32_t PPPhoneLocalSessionInstallRunnerIPA(uintptr_t session, const char *local
 int32_t PPPhoneLocalSessionDiscoverRunner(uintptr_t session, char *message, size_t messageCapacity);
 int32_t PPPhoneLocalSessionLaunchBundleID(uintptr_t session, const char *bundleID, char *message, size_t messageCapacity);
 int32_t PPPhoneLocalSessionTakeScreenshot(uintptr_t session, const char *outputPath, char *message, size_t messageCapacity);
+int32_t PPPhoneLocalSessionTakeScreenshotBounded(uintptr_t session, const char *outputPath, uint64_t timeoutMilliseconds, char *message, size_t messageCapacity);
 int32_t PPPhoneLocalSessionXCTestActivate(uintptr_t session, char *message, size_t messageCapacity);
 int32_t PPPhoneLocalSessionXCTestTap(uintptr_t session, double normalizedX, double normalizedY, char *message, size_t messageCapacity);
+int32_t PPPhoneLocalSessionXCTestTapBounded(uintptr_t session, double normalizedX, double normalizedY, uint64_t timeoutSeconds, char *message, size_t messageCapacity);
 int32_t PPPhoneLocalSessionXCTestSwipe(uintptr_t session, double fromX, double fromY, double toX, double toY, double duration, char *message, size_t messageCapacity);
 int32_t PPPhoneLocalSessionXCTestDispatchTail(uintptr_t session, double pikminFilterX, double pikminFilterY, int32_t pikminCount, int32_t fastMode, char *message, size_t messageCapacity);
 
@@ -134,6 +136,16 @@ int32_t PPTakePhoneScreenshot(
     const char *host,
     uint16_t port,
     const char *outputPath,
+    char *message,
+    size_t messageCapacity
+);
+
+int32_t PPTakePhoneScreenshotBounded(
+    const char *pairingPath,
+    const char *host,
+    uint16_t port,
+    const char *outputPath,
+    uint64_t timeoutMilliseconds,
     char *message,
     size_t messageCapacity
 );
@@ -233,6 +245,17 @@ int32_t PPRunPhoneLocalXCTestTap(
     uint16_t port,
     double normalizedX,
     double normalizedY,
+    char *message,
+    size_t messageCapacity
+);
+
+int32_t PPRunPhoneLocalXCTestTapBounded(
+    const char *pairingPath,
+    const char *host,
+    uint16_t port,
+    double normalizedX,
+    double normalizedY,
+    uint64_t timeoutSeconds,
     char *message,
     size_t messageCapacity
 );

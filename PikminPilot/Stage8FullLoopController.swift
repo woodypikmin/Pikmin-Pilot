@@ -83,7 +83,7 @@ final class Stage8FullLoopController: ObservableObject {
 
         beginBackgroundWindow(label: "initial")
         let goal = self.targetDispatches.map(String.init) ?? "∞"
-        emit("STAGE 11.5.4.22 PILOT RUN START • baseline=11.5.3 • automation-core=10.3.1 • transportHost=\(host):49152 • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • Stage 8.2.2 stable loop core • WDA=OFF")
+        emit("STAGE 11.5.4.23 PILOT RUN START • baseline=11.5.3 • automation-core=10.3.1 • transportHost=\(host):49152 • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • Stage 8.2.2 stable loop core • WDA=OFF")
 
         worker = Task { [weak self] in
             guard let self else { return }
@@ -127,7 +127,7 @@ final class Stage8FullLoopController: ObservableObject {
 
         beginBackgroundWindow(label: "persistent-cellular")
         let goal = self.targetDispatches.map(String.init) ?? "∞"
-        emit("STAGE 11.5.4.22 PERSISTENT CELLULAR RUN START • automation-core=10.3.1 • transport=\(transportLabel) • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • RPPairing-reconnect=DISABLED")
+        emit("STAGE 11.5.4.23 PERSISTENT CELLULAR RUN START • automation-core=10.3.1 • transport=\(transportLabel) • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • RPPairing-reconnect=DISABLED")
 
         worker = Task { [weak self] in
             guard let self else { return }
@@ -1108,7 +1108,7 @@ final class Stage8FullLoopController: ObservableObject {
             )
             try checkCancelled()
 
-            // 11.5.4.22: after AppService foregrounds Pikmin there is a short
+            // 11.5.4.23: after AppService foregrounds Pikmin there is a short
             // UIKit accounting transition where Pilot is already backgrounded and
             // the UIBackgroundTask is live, but backgroundTimeRemaining can still
             // report greatestFiniteMagnitude. 11.5.4.21 interpreted that transient
@@ -1216,7 +1216,7 @@ final class Stage8FullLoopController: ObservableObject {
             needsRearm = remaining < minimumRemaining
         } else if UIApplication.shared.applicationState == .background,
                   backgroundTask != .invalid {
-            // 11.5.4.22: UIKit can briefly leave backgroundTimeRemaining at the
+            // 11.5.4.23: UIKit can briefly leave backgroundTimeRemaining at the
             // unlimited sentinel after AppService switches Pikmin foreground. A
             // live UIBackgroundTask in an actual .background host is provisional
             // execution authority; do not re-foreground Pilot and create a loop.
@@ -1325,7 +1325,7 @@ final class Stage8FullLoopController: ObservableObject {
                     engine: engine,
                     round: round,
                     reason: "pre-close-tap-\(closeTapAttempts + 1)",
-                    minimumRemaining: isIPadDevice ? 14.0 : 12.0
+                    minimumRemaining: isIPadDevice ? 20.0 : 12.0
                 )
 
                 guard let cg = image.cgImage else {
@@ -1338,8 +1338,22 @@ final class Stage8FullLoopController: ObservableObject {
                 }
 
                 closeTapAttempts += 1
-                emit(String(format: "ROUND %d • POST-TAIL ACK green X visible ⚠️ • retry tap %d/%d • point=(%.4f,%.4f)", round, closeTapAttempts, maxCloseTapAttempts, x, y))
-                let tapResult = await engine.runXCTestTap(normalizedX: x, normalizedY: y)
+                if isIPadDevice {
+                    emit(String(format: "ROUND %d • POST-TAIL ACK green X visible ⚠️ • retry tap %d/%d • point=(%.4f,%.4f) • bounded-xctest=12s", round, closeTapAttempts, maxCloseTapAttempts, x, y))
+                } else {
+                    emit(String(format: "ROUND %d • POST-TAIL ACK green X visible ⚠️ • retry tap %d/%d • point=(%.4f,%.4f)", round, closeTapAttempts, maxCloseTapAttempts, x, y))
+                }
+                let tapResult: IDeviceEngine.Result
+                if isIPadDevice {
+                    tapResult = await engine.runXCTestTapBounded(
+                        normalizedX: x,
+                        normalizedY: y,
+                        timeoutSeconds: 12
+                    )
+                } else {
+                    // Preserve the proven iPhone tap path byte-for-byte.
+                    tapResult = await engine.runXCTestTap(normalizedX: x, normalizedY: y)
+                }
                 try checkCancelled()
 
                 if !tapResult.ok {
@@ -1707,14 +1721,24 @@ final class Stage8FullLoopController: ObservableObject {
         let safeTag = tag.replacingOccurrences(of: "/", with: "-")
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("PikminPilot-Stage10.3-\(safeTag).png")
-        let maxAttempts = tag.hasPrefix("post-tail-green-x-ack") ? 6 : 3
+        let isPostTailACK = tag.hasPrefix("post-tail-green-x-ack")
+        let maxAttempts = isPostTailACK ? (isIPadDevice ? 2 : 6) : 3
         var lastFailure = "unknown screenshot failure"
 
         for attempt in 1...maxAttempts {
             try checkCancelled()
             try? FileManager.default.removeItem(at: url)
 
-            let result = await engine.takeScreenshot(outputPath: url.path)
+            let result: IDeviceEngine.Result
+            if isPostTailACK && isIPadDevice {
+                emit("POST-TAIL DVT CAPTURE begin • attempt=\(attempt)/\(maxAttempts) • watchdog=4500ms")
+                result = await engine.takeScreenshotBounded(
+                    outputPath: url.path,
+                    timeoutMilliseconds: 4_500
+                )
+            } else {
+                result = await engine.takeScreenshot(outputPath: url.path)
+            }
             try checkCancelled()
 
             if result.ok,

@@ -15,6 +15,56 @@ git clone https://github.com/jkcoxson/idevice.git "$CACHE"
 cd "$CACHE"
 git checkout "$PIN"
 
+# Stage 11.5.4.23: add a bounded DVT screenshot entry point without changing
+# the existing screenshot_client_take_screenshot ABI. Only the iPad post-tail
+# ACK path uses this new symbol; all existing iPhone/normal screenshot calls
+# remain byte-for-byte on the legacy path.
+cat >> ffi/src/dvt/screenshot.rs <<'RUST_POSTTAIL_SCREENSHOT_TIMEOUT'
+
+/// Pikmin Pilot post-tail bounded screenshot. A stalled DVT read must return
+/// control to the host so it can rebuild the transient channel instead of
+/// consuming the whole finite UIKit background window.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn screenshot_client_take_screenshot_timeout(
+    handle: *mut ScreenshotClientHandle<'static>,
+    data: *mut *mut u8,
+    len: *mut usize,
+    timeout_ms: u64,
+) -> *mut IdeviceFfiError {
+    if handle.is_null() || data.is_null() || len.is_null() {
+        return ffi_err!(idevice::IdeviceError::FfiInvalidArg);
+    }
+    let client = unsafe { &mut (*handle).0 };
+    let bounded_ms = timeout_ms.clamp(500, 15_000);
+    let res = run_sync(async move {
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(bounded_ms),
+            client.take_screenshot(),
+        )
+        .await
+        {
+            Ok(inner) => inner,
+            Err(_) => Err(idevice::IdeviceError::UnexpectedResponse(format!(
+                "DVT screenshot timed out after {bounded_ms} ms"
+            ))),
+        }
+    });
+
+    match res {
+        Ok(r) => {
+            let mut r = r.into_boxed_slice();
+            unsafe {
+                *data = r.as_mut_ptr();
+                *len = r.len();
+            }
+            std::mem::forget(r);
+            std::ptr::null_mut()
+        }
+        Err(e) => ffi_err!(e),
+    }
+}
+RUST_POSTTAIL_SCREENSHOT_TIMEOUT
+
 # Stage 11.3.2: add a diagnostic Personalized-DDI helper as a new impl block.
 # Do not rewrite/replace upstream function bodies: Stage 11.3.0 used an exact
 # multiline text replacement here, which was unnecessarily brittle in CI.
@@ -572,6 +622,29 @@ pub unsafe extern "C" fn pilot_xctest_execute_tap(
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn pilot_xctest_execute_tap_bounded(
+    adapter: *mut core_device_proxy::AdapterHandle,
+    handshake: *mut rsd::RsdHandshakeHandle,
+    normalized_x: f64,
+    normalized_y: f64,
+    timeout_secs: u64,
+    message: *mut std::ffi::c_char,
+    message_capacity: usize,
+) -> i32 {
+    unsafe {
+        pilot_xctest_execute::pilot_xctest_execute_tap_bounded_impl(
+            adapter,
+            handshake,
+            normalized_x,
+            normalized_y,
+            timeout_secs,
+            message,
+            message_capacity,
+        )
+    }
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pilot_xctest_execute_swipe(
     adapter: *mut core_device_proxy::AdapterHandle,
     handshake: *mut rsd::RsdHandshakeHandle,
@@ -673,6 +746,8 @@ required = [
     b"pilot_xctest_execute_center_tap",
     b"pilot_xctest_execute_activate",
     b"pilot_xctest_execute_tap",
+    b"pilot_xctest_execute_tap_bounded",
+    b"screenshot_client_take_screenshot_timeout",
     b"pilot_xctest_execute_swipe",
     b"pilot_xctest_execute_select12",
     b"pilot_xctest_execute_dispatch_tail",
