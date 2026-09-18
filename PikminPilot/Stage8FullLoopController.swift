@@ -52,7 +52,7 @@ final class Stage8FullLoopController: ObservableObject {
     // list is proven. Cellular escape already owns a pinned persistent session,
     // so this flag stays false there and that session is never closed here.
     private var postTailOwnsPersistentSession = false
-    // 11.5.4.29 UNIVERSAL RENEWAL COALESCING: background renewal is decided
+    // 11.5.4.30 UNIVERSAL LEASE LATCH FIX: background renewal is decided
     // by workflow checkpoint + live lease health, not by iPhone/iPad class.
     // Remember the newest successfully established lease so transient UIKit
     // accounting (unbounded/unknown) cannot trigger an immediate duplicate
@@ -100,7 +100,7 @@ final class Stage8FullLoopController: ObservableObject {
 
         beginBackgroundWindow(label: "initial")
         let goal = self.targetDispatches.map(String.init) ?? "∞"
-        emit("STAGE 11.5.4.29 PILOT RUN START • baseline=11.5.3 • automation-core=10.3.1 • transportHost=\(host):49152 • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • Stage 8.2.2 stable loop core • WDA=OFF")
+        emit("STAGE 11.5.4.30 PILOT RUN START • baseline=11.5.3 • automation-core=10.3.1 • transportHost=\(host):49152 • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • Stage 8.2.2 stable loop core • WDA=OFF")
 
         worker = Task { [weak self] in
             guard let self else { return }
@@ -147,7 +147,7 @@ final class Stage8FullLoopController: ObservableObject {
 
         beginBackgroundWindow(label: "persistent-cellular")
         let goal = self.targetDispatches.map(String.init) ?? "∞"
-        emit("STAGE 11.5.4.29 PERSISTENT CELLULAR RUN START • automation-core=10.3.1 • transport=\(transportLabel) • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • RPPairing-reconnect=DISABLED")
+        emit("STAGE 11.5.4.30 PERSISTENT CELLULAR RUN START • automation-core=10.3.1 • transport=\(transportLabel) • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • RPPairing-reconnect=DISABLED")
 
         worker = Task { [weak self] in
             guard let self else { return }
@@ -208,6 +208,18 @@ final class Stage8FullLoopController: ObservableObject {
             UIApplication.shared.endBackgroundTask(backgroundTask)
             backgroundTask = .invalid
         }
+
+        // 11.5.4.30: backgroundRecoveryPending describes the lease that just
+        // expired; it must never poison a newly-created generation. 29 could
+        // inherit this latch across beginBackgroundWindow(), so a healthy new
+        // lease reporting 29.x seconds was still treated as recovery-pending
+        // and PRE-TAIL would bounce Pilot/Pikmin forever. A new generation is
+        // the authoritative lifecycle reset. If *this* generation later
+        // expires, its own expiration handler will latch recovery again.
+        if backgroundRecoveryPending {
+            emit("BACKGROUND recovery latch cleared by new lease generation • generation=\(generation)")
+        }
+        backgroundRecoveryPending = false
 
         backgroundTask = UIApplication.shared.beginBackgroundTask(
             withName: "PikminPilot-Stage10.3-\(label)",
@@ -498,7 +510,7 @@ final class Stage8FullLoopController: ObservableObject {
     ) async throws {
         try checkCancelled()
 
-        // 11.5.4.29 UNIVERSAL CHECKPOINT POLICY. Do not use device class to
+        // 11.5.4.30 UNIVERSAL CHECKPOINT POLICY. Do not use device class to
         // decide whether a foreground bounce is needed. List scanning can run on
         // a small safe-operation reserve; entering detail/selection gets a larger
         // navigation reserve. The verified selection-page checkpoint below still
@@ -2066,7 +2078,18 @@ final class Stage8FullLoopController: ObservableObject {
 
             if let before = finiteBackgroundSeconds() {
                 emit(String(format: "ROUND %d • PRE-TAIL BUDGET check • %.1fs remaining • renew-below=26.0s", round, before))
-                if before >= 26.0 && !backgroundRecoveryPending { return }
+                if before >= 26.0 {
+                    // 11.5.4.30 belt-and-suspenders self-heal: a finite healthy
+                    // current lease always outranks a stale recovery latch from
+                    // an earlier generation. This specifically prevents the
+                    // 29.xs → PRE-TAIL HOLD → renew loop seen on iPhone.
+                    if backgroundRecoveryPending && backgroundTask != .invalid {
+                        backgroundRecoveryPending = false
+                        noteSuccessfulBackgroundRenewal()
+                        emit(String(format: "ROUND %d • PRE-TAIL LEASE SELF-HEALED ✅ • healthy=%.1fs • stale recovery latch cleared", round, before))
+                    }
+                    if !backgroundRecoveryPending { return }
+                }
             }
 
             recovery += 1
@@ -2248,7 +2271,7 @@ final class Stage8FullLoopController: ObservableObject {
         }
     }
 
-    // 11.5.4.29 universal lease policy:
+    // 11.5.4.30 universal lease policy:
     // - ordinary list/screenshot/swipe work uses a small safe-operation floor;
     // - pre-dispatch uses a larger navigation floor;
     // - selection/pre-GO retains its own conservative tail gate;
