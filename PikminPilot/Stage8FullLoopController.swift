@@ -52,6 +52,13 @@ final class Stage8FullLoopController: ObservableObject {
     // list is proven. Cellular escape already owns a pinned persistent session,
     // so this flag stays false there and that session is never closed here.
     private var postTailOwnsPersistentSession = false
+    // 11.5.4.29 UNIVERSAL RENEWAL COALESCING: background renewal is decided
+    // by workflow checkpoint + live lease health, not by iPhone/iPad class.
+    // Remember the newest successfully established lease so transient UIKit
+    // accounting (unbounded/unknown) cannot trigger an immediate duplicate
+    // Pilot↔Pikmin foreground bounce.
+    private var lastBackgroundRenewalAt: Date?
+    private var lastBackgroundRenewalGeneration: UInt64 = 0
     private var logLines: [String] = []
 
     private var statusSink: ((String) -> Void)?
@@ -77,6 +84,8 @@ final class Stage8FullLoopController: ObservableObject {
         backgroundRecoveryPending = false
         observedCriticalTailSeconds = nil
         postTailOwnsPersistentSession = false
+        lastBackgroundRenewalAt = nil
+        lastBackgroundRenewalGeneration = 0
         completedDispatches = 0
         self.targetDispatches = targetDispatches.flatMap { $0 > 0 ? $0 : nil }
         self.pikminType = pikminType
@@ -91,7 +100,7 @@ final class Stage8FullLoopController: ObservableObject {
 
         beginBackgroundWindow(label: "initial")
         let goal = self.targetDispatches.map(String.init) ?? "∞"
-        emit("STAGE 11.5.4.28 PILOT RUN START • baseline=11.5.3 • automation-core=10.3.1 • transportHost=\(host):49152 • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • Stage 8.2.2 stable loop core • WDA=OFF")
+        emit("STAGE 11.5.4.29 PILOT RUN START • baseline=11.5.3 • automation-core=10.3.1 • transportHost=\(host):49152 • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • Stage 8.2.2 stable loop core • WDA=OFF")
 
         worker = Task { [weak self] in
             guard let self else { return }
@@ -122,6 +131,8 @@ final class Stage8FullLoopController: ObservableObject {
         backgroundRecoveryPending = false
         observedCriticalTailSeconds = nil
         postTailOwnsPersistentSession = false
+        lastBackgroundRenewalAt = nil
+        lastBackgroundRenewalGeneration = 0
         completedDispatches = 0
         self.targetDispatches = targetDispatches.flatMap { $0 > 0 ? $0 : nil }
         self.pikminType = pikminType
@@ -136,7 +147,7 @@ final class Stage8FullLoopController: ObservableObject {
 
         beginBackgroundWindow(label: "persistent-cellular")
         let goal = self.targetDispatches.map(String.init) ?? "∞"
-        emit("STAGE 11.5.4.28 PERSISTENT CELLULAR RUN START • automation-core=10.3.1 • transport=\(transportLabel) • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • RPPairing-reconnect=DISABLED")
+        emit("STAGE 11.5.4.29 PERSISTENT CELLULAR RUN START • automation-core=10.3.1 • transport=\(transportLabel) • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • RPPairing-reconnect=DISABLED")
 
         worker = Task { [weak self] in
             guard let self else { return }
@@ -176,6 +187,8 @@ final class Stage8FullLoopController: ObservableObject {
         gameplayForegroundLock = false
         backgroundExpiredDuringCriticalTail = false
         backgroundRecoveryPending = false
+        lastBackgroundRenewalAt = nil
+        lastBackgroundRenewalGeneration = 0
         if backgroundTask != .invalid {
             UIApplication.shared.endBackgroundTask(backgroundTask)
             backgroundTask = .invalid
@@ -485,17 +498,18 @@ final class Stage8FullLoopController: ObservableObject {
     ) async throws {
         try checkCancelled()
 
-        // Renew only while still on the expedition list, before entering any
-        // modal/detail/selection UI. After this point gameplayForegroundLock
-        // prevents Pilot from stealing foreground until the green X is closed.
-        // iPad can occasionally spend ~60s inside an XCTest activate during a
-        // renewal. Do not renew early on the expedition list: the later
-        // pre-critical-tail checkpoint is the safer place to refresh. iPhone
-        // keeps the proven 11.5.4.19 threshold unchanged.
+        // 11.5.4.29 UNIVERSAL CHECKPOINT POLICY. Do not use device class to
+        // decide whether a foreground bounce is needed. List scanning can run on
+        // a small safe-operation reserve; entering detail/selection gets a larger
+        // navigation reserve. The verified selection-page checkpoint below still
+        // owns the expensive pre-tail refresh. This removes the common iPhone
+        // pattern of renewing at ~20s on the list and then renewing again a few
+        // seconds later at selection, while preserving a safety reserve on every
+        // device.
         try await ensureBackgroundBudget(
             engine: engine,
             stage: "pre-dispatch-safe-boundary",
-            minimumRemaining: isIPadDevice ? 10.0 : 22.0
+            minimumRemaining: preDispatchNavigationMinimum
         )
         gameplayForegroundLock = true
 
@@ -918,8 +932,26 @@ final class Stage8FullLoopController: ObservableObject {
 
             if let freshBudget, freshBudget >= freshWindowMinimum {
                 backgroundRecoveryPending = false
+                noteSuccessfulBackgroundRenewal()
                 emit(String(format: "ROUND %d • FINAL TAIL renewal AppService ✅ • window=%d/2 • fresh-background=%.1fs", round, windowAttempt, freshBudget))
-                await pause(0.18)
+                await pause(0.12)
+                return
+            }
+
+            // UIKit often reports greatestFiniteMagnitude for a short interval
+            // immediately after AppService foregrounds Pikmin. If the task is
+            // still live, no expiration was delivered, and Pilot is no longer
+            // active, this is a pending-accounting state rather than a failed
+            // lease. Accept it provisionally instead of bouncing Pilot/Pikmin a
+            // second time. The selection checkpoint + final GO gate remain the
+            // authoritative finite-budget checks.
+            if freshBudget == nil,
+               backgroundTask != .invalid,
+               !backgroundRecoveryPending,
+               UIApplication.shared.applicationState != .active {
+                noteSuccessfulBackgroundRenewal()
+                emit("ROUND \(round) • FINAL TAIL renewal AppService ✅ • window=\(windowAttempt)/2 • background=pending-accounting • live-task=YES • duplicate-bounce=SKIPPED")
+                await pause(0.10)
                 return
             }
 
@@ -2216,30 +2248,91 @@ final class Stage8FullLoopController: ObservableObject {
         }
     }
 
+    // 11.5.4.29 universal lease policy:
+    // - ordinary list/screenshot/swipe work uses a small safe-operation floor;
+    // - pre-dispatch uses a larger navigation floor;
+    // - selection/pre-GO retains its own conservative tail gate;
+    // - unknown accounting on a live, non-expired task is never by itself a
+    //   reason to bounce Pilot/Pikmin;
+    // - a just-created lease is coalesced for a short grace interval so two
+    //   adjacent checkpoints cannot renew the same healthy generation twice.
+    private var safeOperationBackgroundMinimum: Double { fastMode ? 8.0 : 10.0 }
+    private var preDispatchNavigationMinimum: Double { fastMode ? 12.0 : 14.0 }
+    private var renewalCoalescingHardFloor: Double { fastMode ? 6.0 : 8.0 }
+    private var renewalCoalescingInterval: TimeInterval { 4.0 }
+
+    private func noteSuccessfulBackgroundRenewal() {
+        lastBackgroundRenewalAt = Date()
+        lastBackgroundRenewalGeneration = backgroundGeneration
+    }
+
+    private func isRecentLiveRenewal() -> Bool {
+        guard backgroundTask != .invalid,
+              !backgroundRecoveryPending,
+              lastBackgroundRenewalGeneration == backgroundGeneration,
+              let lastBackgroundRenewalAt else {
+            return false
+        }
+        return Date().timeIntervalSince(lastBackgroundRenewalAt) < renewalCoalescingInterval
+    }
+
     private func ensureBackgroundBudget(
         engine: IDeviceEngine,
         stage: String,
-        minimumRemaining: Double = 20.0
+        minimumRemaining: Double? = nil
     ) async throws {
         guard UIApplication.shared.applicationState != .active else {
             backgroundRecoveryPending = false
             return
         }
 
-        let remaining = UIApplication.shared.backgroundTimeRemaining
+        let minimum = minimumRemaining ?? safeOperationBackgroundMinimum
+        let remaining = finiteBackgroundSeconds()
+        let liveLease = backgroundTask != .invalid && !backgroundRecoveryPending
+
         if gameplayForegroundLock {
-            if backgroundRecoveryPending || (remaining.isFinite && remaining < minimumRemaining) {
-                let label = finiteBackgroundSeconds().map { String(format: "%.1fs", $0) } ?? backgroundBudgetLabel()
+            if backgroundRecoveryPending || remaining.map({ $0 < minimum }) == true {
+                let label = remaining.map { String(format: "%.1fs", $0) } ?? backgroundBudgetLabel()
                 emit("FOREGROUND LOCK • \(label) at \(stage) • recovery deferred until green-X/list checkpoint")
             }
             return
         }
 
-        if backgroundRecoveryPending || !remaining.isFinite || remaining < minimumRemaining {
-            let label = finiteBackgroundSeconds().map { String(format: "%.1fs", $0) } ?? backgroundBudgetLabel()
-            emit("BACKGROUND \(label) • recovery/renewal at \(stage) • CONTINUOUS=ON")
-            try await refreshBackgroundWindow(engine: engine, reason: stage)
+        // A live task whose finite number has not appeared yet is the UIKit
+        // accounting transition seen on both iPhone and iPad. Do not turn that
+        // transient value into another foreground bounce.
+        if remaining == nil, liveLease {
+            if stage == "pre-dispatch-safe-boundary" {
+                emit("BACKGROUND accounting pending • stage=\(stage) • live-task=YES • renewal=SKIPPED")
+            }
+            return
         }
+
+        // An expiration or invalid task is authoritative and always wins over
+        // coalescing. Rebuild immediately at this safe boundary.
+        if backgroundRecoveryPending || backgroundTask == .invalid {
+            let label = remaining.map { String(format: "%.1fs", $0) } ?? backgroundBudgetLabel()
+            emit("BACKGROUND \(label) • recovery/renewal at \(stage) • reason=lease-invalid-or-expired • CONTINUOUS=ON")
+            try await refreshBackgroundWindow(engine: engine, reason: stage)
+            return
+        }
+
+        guard let remaining else { return }
+        if remaining >= minimum { return }
+
+        // If this generation was just renewed and is only marginally below
+        // the requested reserve, let the current safe operation consume it
+        // instead of immediately bouncing Pilot/Pikmin again. A checkpoint with
+        // a larger reserve (such as pre-dispatch navigation) still renews if the
+        // lease has fallen materially below that checkpoint's requirement.
+        let coalescingFloor = max(renewalCoalescingHardFloor, minimum - 2.0)
+        if isRecentLiveRenewal(), remaining >= coalescingFloor {
+            emit(String(format: "BACKGROUND %.1fs • renewal coalesced at %@ • minimum=%.1fs • coalesce-floor=%.1fs", remaining, stage, minimum, coalescingFloor) + " • recent-generation=\(backgroundGeneration) • CONTINUE")
+            return
+        }
+
+        emit(String(format: "BACKGROUND %.1fs • recovery/renewal at %@ • minimum=%.1fs • CONTINUOUS=ON", remaining, stage, minimum))
+        try await refreshBackgroundWindow(engine: engine, reason: stage)
     }
 
     /// Safe-boundary background renewal is continuous and AppService-only on
@@ -2321,12 +2414,13 @@ final class Stage8FullLoopController: ObservableObject {
             }
 
             backgroundRecoveryPending = false
+            noteSuccessfulBackgroundRenewal()
             if let fresh {
                 emit(String(format: "BACKGROUND renewed ✅ • reason=%@ • cycle=%d • fresh=%.1fs • AppService-only", reason, cycle, fresh))
             } else {
-                emit("BACKGROUND renewed ✅ • reason=\(reason) • cycle=\(cycle) • background=\(backgroundBudgetLabel()) • AppService-only")
+                emit("BACKGROUND renewed ✅ • reason=\(reason) • cycle=\(cycle) • background=pending-accounting • live-task=YES • AppService-only")
             }
-            await pause(0.22)
+            await pause(fastMode ? 0.08 : 0.12)
             return
         }
     }
