@@ -100,7 +100,7 @@ final class Stage8FullLoopController: ObservableObject {
 
         beginBackgroundWindow(label: "initial")
         let goal = self.targetDispatches.map(String.init) ?? "∞"
-        emit("STAGE 11.5.4.30 PILOT RUN START • baseline=11.5.3 • automation-core=10.3.1 • transportHost=\(host):49152 • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • Stage 8.2.2 stable loop core • WDA=OFF")
+        emit("STAGE 11.5.4.31 PILOT RUN START • baseline=11.5.3 • automation-core=10.3.1 • transportHost=\(host):49152 • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • Stage 8.2.2 stable loop core • WDA=OFF")
 
         worker = Task { [weak self] in
             guard let self else { return }
@@ -147,7 +147,7 @@ final class Stage8FullLoopController: ObservableObject {
 
         beginBackgroundWindow(label: "persistent-cellular")
         let goal = self.targetDispatches.map(String.init) ?? "∞"
-        emit("STAGE 11.5.4.30 PERSISTENT CELLULAR RUN START • automation-core=10.3.1 • transport=\(transportLabel) • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • RPPairing-reconnect=DISABLED")
+        emit("STAGE 11.5.4.31 PERSISTENT CELLULAR RUN START • automation-core=10.3.1 • transport=\(transportLabel) • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • RPPairing-reconnect=DISABLED")
 
         worker = Task { [weak self] in
             guard let self else { return }
@@ -1234,17 +1234,24 @@ final class Stage8FullLoopController: ObservableObject {
                 return
             }
 
-            // Do not bounce Pilot back to foreground merely because UIKit has not
-            // converted "unlimited" to a finite number yet. This exact state was
-            // observed in the field: the following loop iteration immediately saw
-            // ~29.9s remaining. The live task + actual background state is enough
-            // to continue into state reconciliation without replaying GO.
+            // 11.5.4.31: do not bounce Pilot back to foreground while UIKit is
+            // still reporting `.inactive` immediately after AppService foregrounds
+            // Pikmin. On affected iPhones, AppService succeeds, our UIBackgroundTask
+            // is live, and Pilot remains `.inactive` longer than the short accounting
+            // probe; the *next* recovery pass then sees `.background` with ~29.9s.
+            // Treat `.inactive` as an expected transition state, not as evidence that
+            // the post-tail lease failed. The following bounded screenshot/state
+            // reconciliation is authoritative and will still surface a real transport
+            // or expiration failure without replaying GO.
+            let transitionState = UIApplication.shared.applicationState
+            let pikminTransitionInFlight = transitionState == .inactive
             if !backgroundExpiredDuringCriticalTail,
                remaining == nil,
-               observedBackgroundState,
+               (observedBackgroundState || pikminTransitionInFlight),
                backgroundTask != .invalid {
                 backgroundRecoveryPending = false
-                emit("ROUND \(round) • POST-TAIL WINDOW READY ✅ • reason=\(reason) • attempt=\(attempt)/\(maxAttempts) • execution-budget=pending-accounting • live-task=YES • not-a-wait")
+                let transitionLabel = observedBackgroundState ? "background" : "inactive-transition"
+                emit("ROUND \(round) • POST-TAIL WINDOW READY ✅ • reason=\(reason) • attempt=\(attempt)/\(maxAttempts) • execution-budget=pending-accounting • live-task=YES • transition=\(transitionLabel) • no-bounce")
                 return
             }
 
