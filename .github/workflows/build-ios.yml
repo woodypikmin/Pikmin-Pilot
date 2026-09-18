@@ -1,4 +1,4 @@
-name: Build Pikmin Pilot Stage 11.5.4.28 Universal Post-tail Dedicated RSD
+name: Build Pikmin Pilot Stage 11.5.4.29 Universal Post-tail Dedicated RSD
 
 on:
   workflow_dispatch:
@@ -176,8 +176,8 @@ jobs:
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \
             -derivedDataPath build-host \
-            MARKETING_VERSION=11.5.4.28 \
-            CURRENT_PROJECT_VERSION=1168 \
+            MARKETING_VERSION=11.5.4.29 \
+            CURRENT_PROJECT_VERSION=1169 \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY=""
@@ -197,10 +197,10 @@ jobs:
 
           # Final product-level normalization. This happens before any signing,
           # therefore the exact Info.plists that iOS will install are signed later.
-          /usr/libexec/PlistBuddy -c 'Set :CFBundleShortVersionString 11.5.4.28' "$APP/Info.plist"
-          /usr/libexec/PlistBuddy -c 'Set :CFBundleVersion 1168' "$APP/Info.plist"
-          /usr/libexec/PlistBuddy -c 'Set :CFBundleShortVersionString 11.5.4.28' "$TUNNEL/Info.plist"
-          /usr/libexec/PlistBuddy -c 'Set :CFBundleVersion 1168' "$TUNNEL/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Set :CFBundleShortVersionString 11.5.4.29' "$APP/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Set :CFBundleVersion 1169' "$APP/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Set :CFBundleShortVersionString 11.5.4.29' "$TUNNEL/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Set :CFBundleVersion 1169' "$TUNNEL/Info.plist"
 
           HOST_MARKETING="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Info.plist")"
           HOST_BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Info.plist")"
@@ -208,17 +208,17 @@ jobs:
           TUNNEL_BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$TUNNEL/Info.plist")"
           echo "FINAL host version=$HOST_MARKETING build=$HOST_BUILD"
           echo "FINAL tunnel version=$TUNNEL_MARKETING build=$TUNNEL_BUILD"
-          test "$HOST_MARKETING" = "11.5.4.28"
-          test "$HOST_BUILD" = "1168"
-          test "$TUNNEL_MARKETING" = "11.5.4.28"
-          test "$TUNNEL_BUILD" = "1168"
+          test "$HOST_MARKETING" = "11.5.4.29"
+          test "$HOST_BUILD" = "1169"
+          test "$TUNNEL_MARKETING" = "11.5.4.29"
+          test "$TUNNEL_BUILD" = "1169"
 
       - name: Build current unsigned XCUITest Runner
         shell: bash
         run: |
           set -euxo pipefail
           # Runner remains the validated 1153-xfix line even though the Host/Tunnel
-          # install build is 1168. Command-line overrides prevent version bleed.
+          # install build is 1169. Command-line overrides prevent version bleed.
           xcodebuild \
             -project PikminPilot.xcodeproj \
             -scheme PikminPilot \
@@ -227,7 +227,7 @@ jobs:
             -destination 'generic/platform=iOS' \
             -derivedDataPath build-runner \
             build-for-testing \
-            MARKETING_VERSION=11.5.4.28 \
+            MARKETING_VERSION=11.5.4.29 \
             CURRENT_PROJECT_VERSION=1153 \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
@@ -320,12 +320,12 @@ jobs:
           /usr/bin/codesign -d --entitlements :- "$SIGNED_TEST_BUNDLE" > SignedXCTestEntitlements.plist
 
           cp -R "$SIGNED_RUNNER_APP" Payload/
-          rm -f PikminPilotRunner-Stage11.5.4.28-SIGNED.ipa
-          /usr/bin/zip -qry PikminPilotRunner-Stage11.5.4.28-SIGNED.ipa Payload
+          rm -f PikminPilotRunner-Stage11.5.4.29-SIGNED.ipa
+          /usr/bin/zip -qry PikminPilotRunner-Stage11.5.4.29-SIGNED.ipa Payload
           rm -rf Payload SignedRunnerStage
 
-          test -s PikminPilotRunner-Stage11.5.4.28-SIGNED.ipa
-          unzip -t PikminPilotRunner-Stage11.5.4.28-SIGNED.ipa >/dev/null
+          test -s PikminPilotRunner-Stage11.5.4.29-SIGNED.ipa
+          unzip -t PikminPilotRunner-Stage11.5.4.29-SIGNED.ipa >/dev/null
           echo "Runner recursively signed locally on GitHub macOS; no device discovery was used." | tee -a SigningReport.txt
 
       - name: Embed newly signed Runner into host
@@ -333,7 +333,7 @@ jobs:
         run: |
           set -euxo pipefail
           APP="build-host/Build/Products/Release-iphoneos/PikminPilot.app"
-          cp PikminPilotRunner-Stage11.5.4.28-SIGNED.ipa "$APP/PikminPilotEmbeddedRunner.ipa"
+          cp PikminPilotRunner-Stage11.5.4.29-SIGNED.ipa "$APP/PikminPilotEmbeddedRunner.ipa"
           cp PikminPilotEmbeddedRunnerMetadata.plist "$APP/PikminPilotEmbeddedRunnerMetadata.plist"
           test -s "$APP/PikminPilotEmbeddedRunner.ipa"
           test -s "$APP/PikminPilotEmbeddedRunnerMetadata.plist"
@@ -402,12 +402,12 @@ jobs:
           rm -rf Payload
           mkdir Payload
           cp -R "$APP" Payload/
-          /usr/bin/zip -qry PikminPilot-Stage11.5.4.28-FULLY-SIGNED-DEVELOPMENT.ipa Payload
+          /usr/bin/zip -qry PikminPilot-Stage11.5.4.29-FULLY-SIGNED-DEVELOPMENT.ipa Payload
           rm -rf Payload
-          unzip -t PikminPilot-Stage11.5.4.28-FULLY-SIGNED-DEVELOPMENT.ipa >/dev/null
-          unzip -l PikminPilot-Stage11.5.4.28-FULLY-SIGNED-DEVELOPMENT.ipa | grep -F 'PikminPilotEmbeddedRunner.ipa'
-          unzip -l PikminPilot-Stage11.5.4.28-FULLY-SIGNED-DEVELOPMENT.ipa | grep -F 'PikminPilotTunnel.appex'
-          shasum -a 256 PikminPilot-Stage11.5.4.28-FULLY-SIGNED-DEVELOPMENT.ipa | tee PikminPilotSignedSHA256.txt
+          unzip -t PikminPilot-Stage11.5.4.29-FULLY-SIGNED-DEVELOPMENT.ipa >/dev/null
+          unzip -l PikminPilot-Stage11.5.4.29-FULLY-SIGNED-DEVELOPMENT.ipa | grep -F 'PikminPilotEmbeddedRunner.ipa'
+          unzip -l PikminPilot-Stage11.5.4.29-FULLY-SIGNED-DEVELOPMENT.ipa | grep -F 'PikminPilotTunnel.appex'
+          shasum -a 256 PikminPilot-Stage11.5.4.29-FULLY-SIGNED-DEVELOPMENT.ipa | tee PikminPilotSignedSHA256.txt
 
       - name: Build clean end-user release kit
         shell: bash
@@ -418,29 +418,29 @@ jobs:
           else
             PAIRING_MODE="GENERIC"
           fi
-          export PIKMIN_RELEASE_VERSION="11.5.4.28"
-          export PIKMIN_RELEASE_BUILD="1168"
+          export PIKMIN_RELEASE_VERSION="11.5.4.29"
+          export PIKMIN_RELEASE_BUILD="1169"
           export PIKMIN_PAIRING_MODE="$PAIRING_MODE"
           # Invoke through bash so GitHub/ZIP executable-bit loss cannot break packaging.
           bash scripts/make-release-kit.sh \
-            PikminPilot-Stage11.5.4.28-FULLY-SIGNED-DEVELOPMENT.ipa \
-            PikminPilot-11.5.4.28-END-USER-KIT
+            PikminPilot-Stage11.5.4.29-FULLY-SIGNED-DEVELOPMENT.ipa \
+            PikminPilot-11.5.4.29-END-USER-KIT
           /usr/bin/zip -qry \
-            PikminPilot-11.5.4.28-END-USER-KIT.zip \
-            PikminPilot-11.5.4.28-END-USER-KIT
-          unzip -t PikminPilot-11.5.4.28-END-USER-KIT.zip >/dev/null
+            PikminPilot-11.5.4.29-END-USER-KIT.zip \
+            PikminPilot-11.5.4.29-END-USER-KIT
+          unzip -t PikminPilot-11.5.4.29-END-USER-KIT.zip >/dev/null
 
       - uses: actions/upload-artifact@v4
         with:
-          name: PikminPilot-11.5.4.28-END-USER-KIT
-          path: PikminPilot-11.5.4.28-END-USER-KIT.zip
+          name: PikminPilot-11.5.4.29-END-USER-KIT
+          path: PikminPilot-11.5.4.29-END-USER-KIT.zip
 
       - uses: actions/upload-artifact@v4
         with:
-          name: PikminPilot-Stage11.5.4.28-FULLY-SIGNED-DEVELOPMENT
+          name: PikminPilot-Stage11.5.4.29-FULLY-SIGNED-DEVELOPMENT
           path: |
-            PikminPilot-Stage11.5.4.28-FULLY-SIGNED-DEVELOPMENT.ipa
-            PikminPilotRunner-Stage11.5.4.28-SIGNED.ipa
+            PikminPilot-Stage11.5.4.29-FULLY-SIGNED-DEVELOPMENT.ipa
+            PikminPilotRunner-Stage11.5.4.29-SIGNED.ipa
             PikminPilotSignedSHA256.txt
             EmbeddedRunnerSHA256.txt
             RunnerBuiltBundleIdentifier.txt
