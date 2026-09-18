@@ -100,7 +100,7 @@ final class Stage8FullLoopController: ObservableObject {
 
         beginBackgroundWindow(label: "initial")
         let goal = self.targetDispatches.map(String.init) ?? "∞"
-        emit("STAGE 11.5.4.31 PILOT RUN START • baseline=11.5.3 • automation-core=10.3.1 • transportHost=\(host):49152 • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • Stage 8.2.2 stable loop core • WDA=OFF")
+        emit("STAGE 11.5.4.32 PILOT RUN START • baseline=11.5.3 • automation-core=10.3.1 • transportHost=\(host):49152 • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • Stage 8.2.2 stable loop core • WDA=OFF")
 
         worker = Task { [weak self] in
             guard let self else { return }
@@ -147,7 +147,7 @@ final class Stage8FullLoopController: ObservableObject {
 
         beginBackgroundWindow(label: "persistent-cellular")
         let goal = self.targetDispatches.map(String.init) ?? "∞"
-        emit("STAGE 11.5.4.31 PERSISTENT CELLULAR RUN START • automation-core=10.3.1 • transport=\(transportLabel) • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • RPPairing-reconnect=DISABLED")
+        emit("STAGE 11.5.4.32 PERSISTENT CELLULAR RUN START • automation-core=10.3.1 • transport=\(transportLabel) • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • RPPairing-reconnect=DISABLED")
 
         worker = Task { [weak self] in
             guard let self else { return }
@@ -593,11 +593,10 @@ final class Stage8FullLoopController: ObservableObject {
             try checkCancelled()
         }
 
-        // Stage 11.5.4.19: the detail/OCR transition is now proven, but field logs
-        // showed only ~14-17s of finite background time remained by the time the
-        // critical Runner tail began. That is not enough margin for select→GO→X
-        // plus Runner→Pilot handoff. Renew only at this verified selection-page
-        // checkpoint, then re-confirm the page before any filter-row gesture.
+        // 11.5.4.32: at the verified selection checkpoint, renew only if there
+        // is not enough reserve to prepare the filter row. The final commit lease
+        // is acquired *after* the filter is known, avoiding repeated foreground
+        // bouncing and repeated OCR/filter work on slower devices.
         try await ensurePreCriticalTailBudget(engine: engine, round: round)
 
         setPhase("辨識\(pikminType.displayName)皮克敏")
@@ -613,10 +612,9 @@ final class Stage8FullLoopController: ObservableObject {
             throw LoopError("Round \(round): \(pikminType.shortName) filter not detected on fresh foreground-locked frame")
         }
 
-        // 11.5.4.21 CONTINUOUS COMMIT GATE. A thin lease never means STOP.
-        // GO is still replay-safe here, so keep re-arming until there is a usable
-        // commit window (or the user explicitly stops the run). Every re-arm
-        // re-confirms the selection page and obtains a fresh filter coordinate.
+        // 11.5.4.32 UNIVERSAL CHECKPOINT COMMIT. A thin lease never means STOP.
+        // The selection + filter checkpoint is already verified. Re-arm the lease
+        // without re-running the same UI detection after every foreground bounce.
         var filterX = 0.0
         var filterY = 0.0
         let emergencyFloor = fastMode ? 19.0 : 21.0
@@ -774,26 +772,44 @@ final class Stage8FullLoopController: ObservableObject {
     ) async throws -> (point: CGPoint, image: UIImage) {
         let required = requiredCriticalTailStartBudget()
         let emergencyFloor = fastMode ? 19.0 : 21.0
-        var currentFilter = selectedFilter
         var commitAttempt = 0
 
         while true {
             try checkCancelled()
 
-            guard UIApplication.shared.applicationState != .active,
-                  let remaining = finiteBackgroundSeconds() else {
+            if UIApplication.shared.applicationState == .active {
                 emit("ROUND \(round) • FINAL TAIL GATE ✅ • Pilot foreground/unbounded")
-                return currentFilter
+                return selectedFilter
             }
 
-            if remaining >= required {
-                emit(String(format: "ROUND %d • FINAL TAIL GATE ✅ • %.1fs available • target>=%.1fs", round, remaining, required))
-                return currentFilter
+            if let remaining = finiteBackgroundSeconds() {
+                if remaining >= required {
+                    emit(String(format: "ROUND %d • FINAL TAIL GATE ✅ • %.1fs available • target>=%.1fs", round, remaining, required))
+                    return selectedFilter
+                }
+
+                commitAttempt += 1
+                emit(String(format: "ROUND %d • FINAL TAIL GATE HOLD ⚠️ • %.1fs available • target>=%.1fs • GO NOT SENT • recovery=%d", round, remaining, required, commitAttempt))
+            } else if backgroundTask != .invalid,
+                      !backgroundRecoveryPending,
+                      isRecentLiveRenewal() {
+                emit("ROUND \(round) • FINAL TAIL GATE ✅ • background=pending-accounting • fresh-generation=\(backgroundGeneration) • checkpoint-authoritative")
+                return selectedFilter
+            } else {
+                commitAttempt += 1
+                emit("ROUND \(round) • FINAL TAIL GATE HOLD ⚠️ • background=unbounded/unknown without fresh-generation proof • GO NOT SENT • recovery=\(commitAttempt)")
             }
 
-            commitAttempt += 1
-            emit(String(format: "ROUND %d • FINAL TAIL GATE HOLD ⚠️ • %.1fs available • target>=%.1fs • GO NOT SENT • recovery=%d", round, remaining, required, commitAttempt))
-
+            // 11.5.4.32 UNIVERSAL CHECKPOINT COMMIT:
+            // The selection page and filter coordinate were already verified before
+            // entering this function. AppService foreground switching does not send
+            // any input to Pikmin, so re-running screenshot/OCR/filter detection
+            // after every lease renewal only burns the newly-created ~30s window
+            // and can create a visible Pilot↔Pikmin bounce loop on slower devices.
+            // Renew the lease, preserve the verified checkpoint, and commit as soon
+            // as the fresh generation itself is healthy. If the new generation is
+            // genuinely thin, another renewal is allowed, but no game-state work is
+            // repeated until after the atomic tail.
             let previousLock = gameplayForegroundLock
             gameplayForegroundLock = false
             do {
@@ -805,51 +821,43 @@ final class Stage8FullLoopController: ObservableObject {
             } catch {
                 gameplayForegroundLock = previousLock
                 emit("ROUND \(round) • FINAL TAIL recovery retry ⚠️ • recovery=\(commitAttempt) • \(compactTransportMessage(error.localizedDescription)) • run continues")
-                await pause(min(1.20, 0.20 + Double(commitAttempt % 5) * 0.18))
+                await pause(min(0.80, 0.14 + Double(commitAttempt % 4) * 0.12))
                 continue
             }
             gameplayForegroundLock = previousLock
             try checkCancelled()
 
-            guard try await confirmPikminSelectionPage(engine: engine, round: round) else {
-                emit("ROUND \(round) • FINAL TAIL checkpoint HOLD ⚠️ • selection page not yet re-confirmed • GO NOT SENT • retrying")
-                await pause(commitAttempt % 4 == 0 ? 0.90 : 0.30)
-                continue
-            }
-
-            guard let freshFilter = try await detectPikminFilterForTail(
-                engine: engine,
-                round: round,
-                revealFirst: false
-            ) else {
-                emit("ROUND \(round) • FINAL TAIL checkpoint HOLD ⚠️ • \(pikminType.shortName) filter not yet re-confirmed • GO NOT SENT • retrying")
-                await pause(commitAttempt % 4 == 0 ? 0.90 : 0.30)
-                continue
-            }
-            currentFilter = freshFilter
-
             if let after = finiteBackgroundSeconds() {
                 if after >= required {
-                    emit(String(format: "ROUND %d • FINAL TAIL GATE RE-ARMED ✅ • recovery=%d • background=%.1fs • target>=%.1fs", round, commitAttempt, after, required))
-                    return currentFilter
+                    emit(String(format: "ROUND %d • FINAL TAIL CHECKPOINT COMMIT ✅ • recovery=%d • background=%.1fs • selection/filter preserved • no re-scan", round, commitAttempt, after))
+                    return selectedFilter
                 }
 
-                // A freshly-acquired window that remains above the emergency
-                // floor is allowed to proceed after two full recovery cycles.
-                // This avoids an endless re-arm loop on devices whose OCR/filter
-                // work consistently consumes a few seconds of a ~30s lease.
                 if after >= emergencyFloor && commitAttempt >= 2 {
-                    emit(String(format: "ROUND %d • FINAL TAIL GATE bounded proceed ⚠️ • background=%.1fs < target %.1fs • >= emergency %.1fs • handoff recovery armed", round, after, required, emergencyFloor))
-                    return currentFilter
+                    emit(String(format: "ROUND %d • FINAL TAIL bounded checkpoint commit ⚠️ • background=%.1fs < target %.1fs • >= emergency %.1fs • selection/filter preserved", round, after, required, emergencyFloor))
+                    return selectedFilter
                 }
 
-                emit(String(format: "ROUND %d • FINAL TAIL GATE still thin ⚠️ • recovery=%d • background=%.1fs • GO NOT SENT • continuing recovery", round, commitAttempt, after))
-            } else {
-                emit("ROUND \(round) • FINAL TAIL GATE RE-ARMED ✅ • background=\(backgroundBudgetLabel())")
-                return currentFilter
+                emit(String(format: "ROUND %d • FINAL TAIL fresh lease still thin ⚠️ • recovery=%d • background=%.1fs • GO NOT SENT • renewing without UI re-scan", round, commitAttempt, after))
+                await pause(0.10)
+                continue
             }
 
-            await pause(commitAttempt % 4 == 0 ? 0.85 : 0.22)
+            // UIKit can remain at the unlimited sentinel briefly after Pikmin is
+            // foregrounded. A newly-created, live, non-expired generation is enough
+            // proof here because the game checkpoint was already verified and no
+            // Pikmin input occurred during the renewal. Do not wait several seconds
+            // for accounting and then spend that lease re-detecting the same filter.
+            if backgroundTask != .invalid,
+               !backgroundRecoveryPending,
+               UIApplication.shared.applicationState != .active,
+               isRecentLiveRenewal() {
+                emit("ROUND \(round) • FINAL TAIL CHECKPOINT COMMIT ✅ • background=pending-accounting • fresh-generation=\(backgroundGeneration) • selection/filter preserved • no-bounce")
+                return selectedFilter
+            }
+
+            emit("ROUND \(round) • FINAL TAIL fresh lease not yet authoritative ⚠️ • recovery=\(commitAttempt) • GO NOT SENT • retrying renewal")
+            await pause(0.12)
         }
     }
 
@@ -872,10 +880,9 @@ final class Stage8FullLoopController: ObservableObject {
             throw LoopError("Pilot bundle identifier unavailable for final-tail renewal")
         }
 
-        if let freeze = try? await capture(engine: engine, tag: "refresh-\(reason)") {
-            screenshotSink?(freeze)
-        }
-
+        // 11.5.4.32: the caller already owns a verified selection checkpoint.
+        // A pre-renew screenshot is redundant and can cost several seconds on a
+        // slow transport before the fresh lease is even created. Skip it.
         let freshWindowMinimum = fastMode ? 22.0 : 24.0
         var lastFailure = "unknown final-tail AppService renewal failure"
 
@@ -946,7 +953,6 @@ final class Stage8FullLoopController: ObservableObject {
                 backgroundRecoveryPending = false
                 noteSuccessfulBackgroundRenewal()
                 emit(String(format: "ROUND %d • FINAL TAIL renewal AppService ✅ • window=%d/2 • fresh-background=%.1fs", round, windowAttempt, freshBudget))
-                await pause(0.12)
                 return
             }
 
@@ -963,7 +969,6 @@ final class Stage8FullLoopController: ObservableObject {
                UIApplication.shared.applicationState != .active {
                 noteSuccessfulBackgroundRenewal()
                 emit("ROUND \(round) • FINAL TAIL renewal AppService ✅ • window=\(windowAttempt)/2 • background=pending-accounting • live-task=YES • duplicate-bounce=SKIPPED")
-                await pause(0.10)
                 return
             }
 
@@ -1234,7 +1239,7 @@ final class Stage8FullLoopController: ObservableObject {
                 return
             }
 
-            // 11.5.4.31: do not bounce Pilot back to foreground while UIKit is
+            // 11.5.4.32: do not bounce Pilot back to foreground while UIKit is
             // still reporting `.inactive` immediately after AppService foregrounds
             // Pikmin. On affected iPhones, AppService succeeds, our UIBackgroundTask
             // is live, and Pilot remains `.inactive` longer than the short accounting
@@ -1368,13 +1373,20 @@ final class Stage8FullLoopController: ObservableObject {
             needsRearm = true
         } else if let remaining = finiteBackgroundSeconds() {
             needsRearm = remaining < minimumRemaining
-        } else if UIApplication.shared.applicationState == .background,
-                  backgroundTask != .invalid {
-            // 11.5.4.23: UIKit can briefly leave backgroundTimeRemaining at the
-            // unlimited sentinel after AppService switches Pikmin foreground. A
-            // live UIBackgroundTask in an actual .background host is provisional
-            // execution authority; do not re-foreground Pilot and create a loop.
+        } else if (UIApplication.shared.applicationState == .background ||
+                   UIApplication.shared.applicationState == .inactive),
+                  backgroundTask != .invalid,
+                  !backgroundRecoveryPending {
+            // 11.5.4.32: the same provisional transition rule used by the initial
+            // post-tail window must also apply between ACK frames and immediately
+            // before the bounded X tap. Field logs showed `.inactive` + live task
+            // being treated as failure here, which unnecessarily foregrounded
+            // Pilot and created one more visible bounce even though the window was
+            // healthy. Screenshot/tap watchdogs remain the bounded authority.
             needsRearm = false
+            if UIApplication.shared.applicationState == .inactive {
+                emit("ROUND \(round) • POST-TAIL ACK transition accepted ✅ • reason=\(reason) • appState=inactive • live-task=YES • no-bounce")
+            }
         } else {
             needsRearm = true
         }
@@ -2075,32 +2087,34 @@ final class Stage8FullLoopController: ObservableObject {
         engine: IDeviceEngine,
         round: Int
     ) async throws {
+        // 11.5.4.32: this checkpoint only needs enough reserve to prepare the
+        // filter row. The *final* lease is acquired after the filter is already
+        // known. Requiring 26s here forced an early Pilot↔Pikmin bounce and then
+        // a second one immediately before GO on slower phones.
+        let preparationMinimum = fastMode ? 12.0 : 14.0
         var recovery = 0
+
         while true {
             try checkCancelled()
             guard UIApplication.shared.applicationState != .active else {
-                emit("ROUND \(round) • PRE-TAIL BUDGET • Pilot already foreground; no background renewal required")
+                emit("ROUND \(round) • PRE-TAIL PREP • Pilot already foreground; selection checkpoint preserved")
                 return
             }
 
             if let before = finiteBackgroundSeconds() {
-                emit(String(format: "ROUND %d • PRE-TAIL BUDGET check • %.1fs remaining • renew-below=26.0s", round, before))
-                if before >= 26.0 {
-                    // 11.5.4.30 belt-and-suspenders self-heal: a finite healthy
-                    // current lease always outranks a stale recovery latch from
-                    // an earlier generation. This specifically prevents the
-                    // 29.xs → PRE-TAIL HOLD → renew loop seen on iPhone.
-                    if backgroundRecoveryPending && backgroundTask != .invalid {
-                        backgroundRecoveryPending = false
-                        noteSuccessfulBackgroundRenewal()
-                        emit(String(format: "ROUND %d • PRE-TAIL LEASE SELF-HEALED ✅ • healthy=%.1fs • stale recovery latch cleared", round, before))
-                    }
-                    if !backgroundRecoveryPending { return }
+                emit(String(format: "ROUND %d • PRE-TAIL PREP check • %.1fs remaining • prepare-filter-below=%.1fs", round, before, preparationMinimum))
+                if before >= preparationMinimum,
+                   !backgroundRecoveryPending,
+                   backgroundTask != .invalid {
+                    return
                 }
+            } else if backgroundTask != .invalid, !backgroundRecoveryPending {
+                emit("ROUND \(round) • PRE-TAIL PREP ✅ • background=pending-accounting • live-task=YES • no early bounce")
+                return
             }
 
             recovery += 1
-            emit("ROUND \(round) • PRE-TAIL HOLD ⚠️ • safe selection checkpoint • GO NOT SENT • recovery=\(recovery)")
+            emit("ROUND \(round) • PRE-TAIL PREP HOLD ⚠️ • safe selection checkpoint • GO NOT SENT • recovery=\(recovery)")
 
             let previousLock = gameplayForegroundLock
             gameplayForegroundLock = false
@@ -2112,29 +2126,36 @@ final class Stage8FullLoopController: ObservableObject {
                 )
             } catch {
                 gameplayForegroundLock = previousLock
-                emit("ROUND \(round) • PRE-TAIL renewal retry ⚠️ • \(compactTransportMessage(error.localizedDescription)) • run continues")
-                await pause(min(1.20, 0.25 + Double(recovery % 5) * 0.18))
+                emit("ROUND \(round) • PRE-TAIL PREP renewal retry ⚠️ • \(compactTransportMessage(error.localizedDescription)) • run continues")
+                await pause(min(0.80, 0.16 + Double(recovery % 4) * 0.12))
                 continue
             }
             gameplayForegroundLock = previousLock
             try checkCancelled()
 
-            guard try await confirmPikminSelectionPage(engine: engine, round: round) else {
-                emit("ROUND \(round) • PRE-TAIL checkpoint HOLD ⚠️ • selection page not yet confirmed after renewal • retrying same round")
-                await pause(recovery % 4 == 0 ? 0.90 : 0.30)
-                continue
-            }
-
+            // No input was sent to Pikmin while Pilot briefly owned foreground.
+            // The already-proven selection checkpoint is therefore authoritative;
+            // do not OCR/screenshot it again and spend the new lease before filter
+            // preparation even begins.
             if let after = finiteBackgroundSeconds() {
-                emit(String(format: "ROUND %d • PRE-TAIL RENEWED ✅ • selection re-confirmed • background=%.1fs", round, after))
-                if after >= 22.0 { return }
-                emit(String(format: "ROUND %d • PRE-TAIL window still thin ⚠️ • %.1fs • retrying instead of FAILED", round, after))
-                await pause(0.22)
+                emit(String(format: "ROUND %d • PRE-TAIL PREP RENEWED ✅ • background=%.1fs • selection checkpoint preserved • no re-confirm", round, after))
+                if after >= preparationMinimum { return }
+                if recovery >= 2, after >= 8.0 {
+                    emit(String(format: "ROUND %d • PRE-TAIL PREP bounded proceed ⚠️ • %.1fs • final commit renewal remains armed", round, after))
+                    return
+                }
+                await pause(0.10)
                 continue
             }
 
-            emit("ROUND \(round) • PRE-TAIL RENEWED ✅ • selection re-confirmed • background=\(backgroundBudgetLabel())")
-            return
+            if backgroundTask != .invalid,
+               !backgroundRecoveryPending,
+               UIApplication.shared.applicationState != .active {
+                emit("ROUND \(round) • PRE-TAIL PREP RENEWED ✅ • background=pending-accounting • selection checkpoint preserved • no re-confirm")
+                return
+            }
+
+            await pause(0.12)
         }
     }
 
