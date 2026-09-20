@@ -1217,7 +1217,6 @@ final class Stage8FullLoopController: ObservableObject {
             return false
         }
 
-        let effectiveRequired = min(currentPlan.count, count.maximum)
         emit("ROUND \(round) • SELECTION-FALLBACK confirmed ✅ • selected=\(count.selected)/\(count.maximum) • configured=\(currentPlan.count) • effective-required=\(effectiveRequired) • " + (busyToastSeen ? "busy-toast=SEEN • " : "busy-toast=not-required • ") + "tap 取消")
         try await tap(
             engine: engine,
