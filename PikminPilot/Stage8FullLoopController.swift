@@ -20,6 +20,7 @@ final class Stage8FullLoopController: ObservableObject {
     @Published private(set) var targetDispatches: Int?
     @Published private(set) var pikminType: PilotPikminType = .pink
     @Published private(set) var pikminCount = 12
+    @Published private(set) var pikminFallbackPlans: [PilotPikminPlan] = []
     @Published private(set) var cargoMode: PilotCargoMode = .fruit
     @Published private(set) var fastMode = false
 
@@ -70,6 +71,7 @@ final class Stage8FullLoopController: ObservableObject {
         targetDispatches: Int?,
         pikminType: PilotPikminType,
         pikminCount: Int,
+        fallbackPlans: [PilotPikminPlan],
         cargoMode: PilotCargoMode,
         fastMode: Bool,
         onStatus: @escaping (String) -> Void,
@@ -90,6 +92,7 @@ final class Stage8FullLoopController: ObservableObject {
         self.targetDispatches = targetDispatches.flatMap { $0 > 0 ? $0 : nil }
         self.pikminType = pikminType
         self.pikminCount = min(12, max(pikminType.minimumCount, pikminCount))
+        self.pikminFallbackPlans = Array(fallbackPlans.prefix(3))
         self.cargoMode = cargoMode
         self.fastMode = fastMode
         logLines.removeAll(keepingCapacity: true)
@@ -100,7 +103,7 @@ final class Stage8FullLoopController: ObservableObject {
 
         beginBackgroundWindow(label: "initial")
         let goal = self.targetDispatches.map(String.init) ?? "∞"
-        emit("STAGE 11.5.4.32 PILOT RUN START • baseline=11.5.3 • automation-core=10.3.1 • transportHost=\(host):49152 • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • Stage 8.2.2 stable loop core • WDA=OFF")
+        emit("STAGE 11.5.4.33 PILOT RUN START • baseline=11.5.3 • automation-core=10.3.1 • transportHost=\(host):49152 • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • Stage 8.2.2 stable loop core • WDA=OFF")
 
         worker = Task { [weak self] in
             guard let self else { return }
@@ -117,6 +120,7 @@ final class Stage8FullLoopController: ObservableObject {
         targetDispatches: Int?,
         pikminType: PilotPikminType,
         pikminCount: Int,
+        fallbackPlans: [PilotPikminPlan],
         cargoMode: PilotCargoMode,
         fastMode: Bool,
         onStatus: @escaping (String) -> Void,
@@ -137,6 +141,7 @@ final class Stage8FullLoopController: ObservableObject {
         self.targetDispatches = targetDispatches.flatMap { $0 > 0 ? $0 : nil }
         self.pikminType = pikminType
         self.pikminCount = min(12, max(pikminType.minimumCount, pikminCount))
+        self.pikminFallbackPlans = Array(fallbackPlans.prefix(3))
         self.cargoMode = cargoMode
         self.fastMode = fastMode
         logLines.removeAll(keepingCapacity: true)
@@ -147,7 +152,7 @@ final class Stage8FullLoopController: ObservableObject {
 
         beginBackgroundWindow(label: "persistent-cellular")
         let goal = self.targetDispatches.map(String.init) ?? "∞"
-        emit("STAGE 11.5.4.32 PERSISTENT CELLULAR RUN START • automation-core=10.3.1 • transport=\(transportLabel) • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • RPPairing-reconnect=DISABLED")
+        emit("STAGE 11.5.4.33 PERSISTENT CELLULAR RUN START • automation-core=10.3.1 • transport=\(transportLabel) • target=\(goal) • cargo=\(self.cargoMode.displayName) • pikmin=\(self.pikminType.shortName)×\(self.pikminCount) • speed=\(self.fastMode ? "FAST" : "STABLE") • RPPairing-reconnect=DISABLED")
 
         worker = Task { [weak self] in
             guard let self else { return }
@@ -593,89 +598,113 @@ final class Stage8FullLoopController: ObservableObject {
             try checkCancelled()
         }
 
-        // 11.5.4.32: at the verified selection checkpoint, renew only if there
+        // 11.5.4.35: at the verified selection checkpoint, renew only if there
         // is not enough reserve to prepare the filter row. The final commit lease
         // is acquired *after* the filter is known, avoiding repeated foreground
         // bouncing and repeated OCR/filter work on slower devices.
         try await ensurePreCriticalTailBudget(engine: engine, round: round)
 
-        setPhase("辨識\(pikminType.displayName)皮克敏")
-        emit("ROUND \(round) • selection page stable • detect \(pikminType.shortName) filter on fresh foreground-locked frame")
-        await pause(fastMode ? 0.18 : 0.28)
-        try checkCancelled()
+        let dispatchPlans = [PilotPikminPlan(type: pikminType, count: pikminCount)] + pikminFallbackPlans
+        var planIndex = 0
 
-        guard var selectedFilter = try await detectPikminFilterForTail(
-            engine: engine,
-            round: round,
-            revealFirst: true
-        ) else {
-            throw LoopError("Round \(round): \(pikminType.shortName) filter not detected on fresh foreground-locked frame")
-        }
-
-        // 11.5.4.32 UNIVERSAL CHECKPOINT COMMIT. A thin lease never means STOP.
-        // The selection + filter checkpoint is already verified. Re-arm the lease
-        // without re-running the same UI detection after every foreground bounce.
-        var filterX = 0.0
-        var filterY = 0.0
-        let emergencyFloor = fastMode ? 19.0 : 21.0
-        while true {
+        while planIndex < dispatchPlans.count {
             try checkCancelled()
-            selectedFilter = try await ensureFinalCriticalTailCommitBudget(
+            let plan = dispatchPlans[planIndex]
+            let fallbackLabel = planIndex == 0 ? "PRIMARY" : "FALLBACK-\(planIndex)"
+
+            setPhase("辨識\(plan.type.displayName)皮克敏")
+            emit("ROUND \(round) • \(fallbackLabel) selection page stable • detect \(plan.type.shortName) filter • count=\(plan.count)")
+            await pause(fastMode ? 0.18 : 0.28)
+            try checkCancelled()
+
+            guard var selectedFilter = try await detectPikminFilterForTail(
                 engine: engine,
                 round: round,
-                selectedFilter: selectedFilter
+                type: plan.type,
+                revealFirst: true
+            ) else {
+                throw LoopError("Round \(round): \(plan.type.shortName) filter not detected on fresh foreground-locked frame")
+            }
+
+            var filterX = 0.0
+            var filterY = 0.0
+            let emergencyFloor = fastMode ? 19.0 : 21.0
+            while true {
+                try checkCancelled()
+                selectedFilter = try await ensureFinalCriticalTailCommitBudget(
+                    engine: engine,
+                    round: round,
+                    pikminCount: plan.count,
+                    selectedFilter: selectedFilter
+                )
+
+                guard let filterCG = selectedFilter.image.cgImage else {
+                    throw LoopError("Round \(round): Pikmin filter screenshot has no CGImage")
+                }
+                filterX = Double(selectedFilter.point.x) / Double(filterCG.width)
+                filterY = Double(selectedFilter.point.y) / Double(filterCG.height)
+
+                if let remaining = finiteBackgroundSeconds(), remaining < emergencyFloor {
+                    emit(String(format: "ROUND %d • FINAL COMMIT HOLD ⚠️ • %.1fs < emergency %.1fs • GO NOT SENT • re-arming same round", round, remaining, emergencyFloor))
+                    continue
+                }
+                break
+            }
+
+            setPhase("\(plan.type.shortName) → \(plan.count) 隻 → GO → 關閉 X")
+            emit(String(format: "ROUND %d • ONE XCTest critical tail begin • plan=%@ • type=%@ • filter=(%.4f,%.4f) • select=%d→GO→greenX • speed=%@", round, fallbackLabel, plan.type.shortName, filterX, filterY, plan.count, fastMode ? "FAST" : "STABLE"))
+
+            if let remaining = finiteBackgroundSeconds() {
+                let required = requiredCriticalTailStartBudget(pikminCount: plan.count)
+                emit(String(format: "ROUND %d • fresh background budget before critical tail = %.1fs • target>=%.1fs", round, remaining, required))
+            }
+
+            let tailStartedAt = Date()
+            criticalTailInProgress = true
+            backgroundExpiredDuringCriticalTail = false
+            let tail = await engine.runXCTestDispatchTail(
+                pikminX: filterX,
+                pikminY: filterY,
+                pikminCount: plan.count,
+                fastMode: fastMode
             )
+            criticalTailInProgress = false
+            try checkCancelled()
 
-            guard let filterCG = selectedFilter.image.cgImage else {
-                throw LoopError("Round \(round): Pikmin filter screenshot has no CGImage")
+            let tailElapsed = Date().timeIntervalSince(tailStartedAt)
+            observedCriticalTailSeconds = max(observedCriticalTailSeconds ?? 0, tailElapsed)
+            if tail.ok {
+                if let postTailRemaining = finiteBackgroundSeconds() {
+                    emit(String(format: "ROUND %d • ONE XCTest critical tail completed ✅ • %@→%d→GO→greenX • tail=%.2fs • background=%.1fs", round, plan.type.shortName, plan.count, tailElapsed, postTailRemaining))
+                } else {
+                    emit(String(format: "ROUND %d • ONE XCTest critical tail completed ✅ • %@→%d→GO→greenX • tail=%.2fs • background=%@", round, plan.type.shortName, plan.count, tailElapsed, backgroundBudgetLabel()))
+                }
+                break
             }
-            filterX = Double(selectedFilter.point.x) / Double(filterCG.width)
-            filterY = Double(selectedFilter.point.y) / Double(filterCG.height)
 
-            if let remaining = finiteBackgroundSeconds(), remaining < emergencyFloor {
-                emit(String(format: "ROUND %d • FINAL COMMIT HOLD ⚠️ • %.1fs < emergency %.1fs • GO NOT SENT • re-arming same round", round, remaining, emergencyFloor))
-                continue
+            // Runner 1153-xfix emits this exact failure before tapping GO. 11.5.4.35
+            // no longer depends on the short-lived 「這隻皮克敏似乎很忙」 toast.
+            // Instead, Pilot reads the persistent selection header (for example
+            // 「可以選擇最多12隻皮克敏（1/12）」). Only a verified selectedCount <
+            // min(configuredCount, liveMaximum) may advance to the next fallback.
+            if isKnownPreGOSelectionFailure(tail.message),
+               planIndex + 1 < dispatchPlans.count {
+                let nextPlan = dispatchPlans[planIndex + 1]
+                let recovered = try await recoverInsufficientPikminSelection(
+                    engine: engine,
+                    round: round,
+                    currentPlan: plan,
+                    nextPlan: nextPlan,
+                    attempt: planIndex + 1
+                )
+                if recovered {
+                    planIndex += 1
+                    continue
+                }
             }
-            break
-        }
 
-        setPhase("\(pikminType.shortName) → \(pikminCount) 隻 → GO → 關閉 X")
-        emit(String(format: "ROUND %d • ONE XCTest critical tail begin • type=%@ • filter=(%.4f,%.4f) • select=%d→GO→greenX • speed=%@", round, pikminType.shortName, filterX, filterY, pikminCount, fastMode ? "FAST" : "STABLE"))
-
-        if let remaining = finiteBackgroundSeconds() {
-            let required = requiredCriticalTailStartBudget()
-            emit(String(format: "ROUND %d • fresh background budget before critical tail = %.1fs • target>=%.1fs", round, remaining, required))
-        }
-
-        let tailStartedAt = Date()
-        criticalTailInProgress = true
-        backgroundExpiredDuringCriticalTail = false
-        let tail = await engine.runXCTestDispatchTail(
-            pikminX: filterX,
-            pikminY: filterY,
-            pikminCount: pikminCount,
-            fastMode: fastMode
-        )
-        criticalTailInProgress = false
-
-        // STOP NOW may have been requested while the already-dispatched atomic
-        // Runner tail was in flight. The tail itself cannot be revoked reliably.
-        try checkCancelled()
-
-        let tailElapsed = Date().timeIntervalSince(tailStartedAt)
-        observedCriticalTailSeconds = max(observedCriticalTailSeconds ?? 0, tailElapsed)
-        if tail.ok {
-            if let postTailRemaining = finiteBackgroundSeconds() {
-                emit(String(format: "ROUND %d • ONE XCTest critical tail completed ✅ • %@→%d→GO→greenX • tail=%.2fs • background=%.1fs", round, pikminType.shortName, pikminCount, tailElapsed, postTailRemaining))
-            } else {
-                emit(String(format: "ROUND %d • ONE XCTest critical tail completed ✅ • %@→%d→GO→greenX • tail=%.2fs • background=%@", round, pikminType.shortName, pikminCount, tailElapsed, backgroundBudgetLabel()))
-            }
-        } else {
-            // Once dispatchtail crossed the XCTest boundary, a timeout/BrokenPipe
-            // cannot prove whether GO happened. Never replay GO from a transport
-            // return code. Hold the committed checkpoint and let screenshots/game
-            // state prove Green-X/list before completed is incremented.
             emit("ROUND \(round) • CRITICAL TAIL RESULT UNCERTAIN ⚠️ • tail=\(String(format: "%.2f", tailElapsed))s • \(compactTransportMessage(tail.message)) • GO-REPLAY=FORBIDDEN • entering state reconciliation")
+            break
         }
 
         setPhase("回到探險列表")
@@ -692,20 +721,21 @@ final class Stage8FullLoopController: ObservableObject {
     private func detectPikminFilterForTail(
         engine: IDeviceEngine,
         round: Int,
+        type: PilotPikminType,
         revealFirst: Bool
     ) async throws -> (point: CGPoint, image: UIImage)? {
         if !revealFirst {
             try checkCancelled()
             let preserved = try await capture(engine: engine, tag: "pikmin-filter-post-renew-fresh")
             screenshotSink?(preserved)
-            if let point = ImageAutomationDetector.detectPikminFilter(type: pikminType, in: preserved) {
-                emit("ROUND \(round) • \(pikminType.shortName) filter preserved after final renewal ✅")
+            if let point = ImageAutomationDetector.detectPikminFilter(type: type, in: preserved) {
+                emit("ROUND \(round) • \(type.shortName) filter preserved after final renewal ✅")
                 return (point, preserved)
             }
             emit("ROUND \(round) • filter row not immediately visible after final renewal • revealing once")
         }
 
-        emit("ROUND \(round) • reveal Pikmin filter row • target=\(pikminType.shortName)")
+        emit("ROUND \(round) • reveal Pikmin filter row • target=\(type.shortName)")
         let revealFrame = try await capture(engine: engine, tag: "pikmin-filter-reveal-geometry")
         try await swipeInContent(
             engine: engine,
@@ -725,12 +755,12 @@ final class Stage8FullLoopController: ObservableObject {
 
             let image = try await capture(engine: engine, tag: "pikmin-filter-fresh")
             screenshotSink?(image)
-            if let point = ImageAutomationDetector.detectPikminFilter(type: pikminType, in: image) {
-                emit("ROUND \(round) • \(pikminType.shortName) filter detected on fresh frame ✅")
+            if let point = ImageAutomationDetector.detectPikminFilter(type: type, in: image) {
+                emit("ROUND \(round) • \(type.shortName) filter detected on fresh frame ✅")
                 return (point, image)
             }
 
-            emit("ROUND \(round) • \(pikminType.shortName) filter miss attempt \(attempt + 1)/5")
+            emit("ROUND \(round) • \(type.shortName) filter miss attempt \(attempt + 1)/5")
             if attempt < 4 {
                 try await swipeInContent(
                     engine: engine,
@@ -752,8 +782,9 @@ final class Stage8FullLoopController: ObservableObject {
     /// prediction of XCTest runtime; it is a conservative admission control
     /// floor. It adapts upward if this device has already demonstrated a slower
     /// successful tail in the same run.
-    private func requiredCriticalTailStartBudget() -> Double {
-        let countExtra = Double(max(0, pikminCount - 2))
+    private func requiredCriticalTailStartBudget(pikminCount: Int? = nil) -> Double {
+        let count = pikminCount ?? self.pikminCount
+        let countExtra = Double(max(0, count - 2))
         let staticFloor = fastMode
             ? min(24.0, 22.0 + countExtra * 0.08)
             : min(26.0, 24.0 + countExtra * 0.10)
@@ -768,9 +799,10 @@ final class Stage8FullLoopController: ObservableObject {
     private func ensureFinalCriticalTailCommitBudget(
         engine: IDeviceEngine,
         round: Int,
+        pikminCount: Int,
         selectedFilter: (point: CGPoint, image: UIImage)
     ) async throws -> (point: CGPoint, image: UIImage) {
-        let required = requiredCriticalTailStartBudget()
+        let required = requiredCriticalTailStartBudget(pikminCount: pikminCount)
         let emergencyFloor = fastMode ? 19.0 : 21.0
         var commitAttempt = 0
 
@@ -800,7 +832,7 @@ final class Stage8FullLoopController: ObservableObject {
                 emit("ROUND \(round) • FINAL TAIL GATE HOLD ⚠️ • background=unbounded/unknown without fresh-generation proof • GO NOT SENT • recovery=\(commitAttempt)")
             }
 
-            // 11.5.4.32 UNIVERSAL CHECKPOINT COMMIT:
+            // 11.5.4.33 UNIVERSAL CHECKPOINT COMMIT:
             // The selection page and filter coordinate were already verified before
             // entering this function. AppService foreground switching does not send
             // any input to Pikmin, so re-running screenshot/OCR/filter detection
@@ -880,7 +912,7 @@ final class Stage8FullLoopController: ObservableObject {
             throw LoopError("Pilot bundle identifier unavailable for final-tail renewal")
         }
 
-        // 11.5.4.32: the caller already owns a verified selection checkpoint.
+        // 11.5.4.33: the caller already owns a verified selection checkpoint.
         // A pre-renew screenshot is redundant and can cost several seconds on a
         // slow transport before the fresh lease is even created. Skip it.
         let freshWindowMinimum = fastMode ? 22.0 : 24.0
@@ -978,6 +1010,272 @@ final class Stage8FullLoopController: ObservableObject {
         }
 
         throw LoopError("phase=final-tail-refresh-window • unable to obtain fresh finite background window • \(lastFailure)")
+    }
+
+    // 11.5.4.35 SELECTION-COUNT FALLBACK. Runner 1153-xfix is intentionally
+    // unchanged. Its "active GO not detected after selecting" failure occurs
+    // before GO is tapped, so the host can safely inspect the persistent selection
+    // header. The short-lived busy toast is only diagnostic; the source of truth
+    // is selected < min(configuredCount, liveMaximum) for fallback 1/2/3.
+    private func isKnownPreGOSelectionFailure(_ message: String) -> Bool {
+        let t = normalizedAutomationText(message)
+        return t.contains("activegonotdetectedafterselecting")
+    }
+
+    private func isBusyPikminText(_ text: String) -> Bool {
+        let t = normalizedAutomationText(text)
+        return t.contains("這隻皮克敏似乎很忙") ||
+            t.contains("这只皮克敏似乎很忙") ||
+            t.contains("皮克敏似乎很忙") ||
+            t.contains("pikminseemsbusy")
+    }
+
+    private struct SelectionCountObservation {
+        let selected: Int
+        let maximum: Int
+        let headerText: String
+    }
+
+    private func firstRegexIntegers(
+        _ pattern: String,
+        in text: String,
+        expectedCaptures: Int
+    ) -> [Int]? {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        guard let match = regex.firstMatch(in: text, range: range),
+              match.numberOfRanges == expectedCaptures + 1 else { return nil }
+
+        var values: [Int] = []
+        for index in 1...expectedCaptures {
+            let r = match.range(at: index)
+            guard r.location != NSNotFound,
+                  let swiftRange = Range(r, in: text),
+                  let value = Int(text[swiftRange]) else { return nil }
+            values.append(value)
+        }
+        return values
+    }
+
+    private func parseSelectionCount(from textItems: [OCRItem]) -> SelectionCountObservation? {
+        guard let header = textItems.first(where: { isSelectionHeaderText($0.text) }) else {
+            return nil
+        }
+
+        // The header itself usually contains both the capacity and the current
+        // selected count. Keep the capacity as a cross-check so unrelated OCR
+        // fractions elsewhere on the screen cannot trigger a fallback.
+        let normalizedHeader = header.text
+            .replacingOccurrences(of: "（", with: "(")
+            .replacingOccurrences(of: "）", with: ")")
+            .replacingOccurrences(of: "／", with: "/")
+
+        var headerMaximum: Int?
+        if let values = firstRegexIntegers("最多\\s*([0-9]{1,2})", in: normalizedHeader, expectedCaptures: 1) {
+            headerMaximum = values[0]
+        } else if let values = firstRegexIntegers("select\\s*up\\s*to\\s*([0-9]{1,2})", in: normalizedHeader.lowercased(), expectedCaptures: 1) {
+            headerMaximum = values[0]
+        }
+
+        func validatedObservation(in text: String) -> SelectionCountObservation? {
+            let normalized = text
+                .replacingOccurrences(of: "（", with: "(")
+                .replacingOccurrences(of: "）", with: ")")
+                .replacingOccurrences(of: "／", with: "/")
+            guard let values = firstRegexIntegers("([0-9]{1,2})\\s*/\\s*([0-9]{1,2})", in: normalized, expectedCaptures: 2) else {
+                return nil
+            }
+            let selected = values[0]
+            let maximum = values[1]
+            guard maximum >= 1, maximum <= 12, selected >= 0, selected <= maximum else {
+                return nil
+            }
+            if let headerMaximum, maximum != headerMaximum {
+                return nil
+            }
+            return SelectionCountObservation(
+                selected: selected,
+                maximum: maximum,
+                headerText: header.text
+            )
+        }
+
+        if let direct = validatedObservation(in: normalizedHeader) {
+            return direct
+        }
+
+        // Vision occasionally splits the trailing “(1/12)” into a separate OCR
+        // item. Only consider items close to the detected header and require the
+        // denominator to agree with the header capacity when that capacity exists.
+        let verticalTolerance = max(56.0, header.rect.height * 2.8)
+        let nearby = textItems
+            .filter { abs($0.rect.midY - header.rect.midY) <= verticalTolerance }
+            .sorted { lhs, rhs in
+                if abs(lhs.rect.midY - rhs.rect.midY) > 8.0 {
+                    return lhs.rect.midY < rhs.rect.midY
+                }
+                return lhs.rect.minX < rhs.rect.minX
+            }
+
+        for item in nearby {
+            if let observation = validatedObservation(in: item.text) {
+                return observation
+            }
+        }
+
+        let combined = nearby.map(\.text).joined(separator: " ")
+        return validatedObservation(in: combined)
+    }
+
+    private func recoverInsufficientPikminSelection(
+        engine: IDeviceEngine,
+        round: Int,
+        currentPlan: PilotPikminPlan,
+        nextPlan: PilotPikminPlan,
+        attempt: Int
+    ) async throws -> Bool {
+        emit("ROUND \(round) • SELECTION-FALLBACK probe • current=\(currentPlan.type.shortName)×\(currentPlan.count) • candidate=\(nextPlan.type.shortName)×\(nextPlan.count) • fallback=\(attempt)/3 • GO NOT SENT")
+
+        _ = try await ensurePilotForegroundAfterTail(
+            engine: engine,
+            round: round,
+            context: "selection-fallback"
+        )
+
+        let previousLock = gameplayForegroundLock
+        gameplayForegroundLock = false
+        do {
+            try await refreshBackgroundWindowAppServiceOnly(
+                engine: engine,
+                reason: "selection-fallback-r\(round)-a\(attempt)",
+                round: round
+            )
+        } catch {
+            gameplayForegroundLock = previousLock
+            throw error
+        }
+        gameplayForegroundLock = previousLock
+
+        // The count is persistent, so use two short OCR opportunities rather than
+        // racing the transient busy toast. Fallback is fail-closed: no trustworthy
+        // count means no plan switch.
+        var acceptedImage: UIImage?
+        var acceptedTextItems: [OCRItem] = []
+        var acceptedCount: SelectionCountObservation?
+        var busyToastSeen = false
+
+        for probe in 1...2 {
+            try checkCancelled()
+            let image = try await capture(engine: engine, tag: "selection-fallback-count")
+            screenshotSink?(image)
+            let textItems = await FruitDetector.recognizeAllText(image: image)
+            try checkCancelled()
+
+            let joined = textItems.map(\.text).joined(separator: " ")
+            busyToastSeen = busyToastSeen || isBusyPikminText(joined)
+
+            if let count = parseSelectionCount(from: textItems) {
+                let effectiveRequired = min(currentPlan.count, count.maximum)
+                emit("ROUND \(round) • SELECTION COUNT ✅ • selected=\(count.selected)/\(count.maximum) • configured=\(currentPlan.count) • effective-required=\(effectiveRequired) • probe=\(probe)/2" + (busyToastSeen ? " • busy-toast=SEEN" : ""))
+                acceptedImage = image
+                acceptedTextItems = textItems
+                acceptedCount = count
+                break
+            }
+
+            if probe == 1 {
+                emit("ROUND \(round) • SELECTION COUNT waiting • persistent header not parsed on probe 1/2")
+                await pause(fastMode ? 0.16 : 0.24)
+            }
+        }
+
+        guard let count = acceptedCount,
+              let image = acceptedImage else {
+            emit("ROUND \(round) • SELECTION-FALLBACK suppressed ⚠️ • Runner failed before GO, but selected/requested count could not be verified")
+            return false
+        }
+
+        // 11.5.4.35 UNIVERSAL EFFECTIVE REQUIREMENT:
+        // The user's configured count is a preference, while the live expedition
+        // capacity is a hard cap. A plan is complete when the number actually
+        // selected reaches min(configuredCount, liveMaximum). This keeps common
+        // low-count plans such as 紫/岩 ×2 valid on a 12-slot expedition (2/12),
+        // while also treating a configured ×6 plan on a 2-slot expedition as
+        // satisfied at 2/2 instead of incorrectly demanding six selections.
+        let effectiveRequired = min(currentPlan.count, count.maximum)
+        guard count.selected < effectiveRequired else {
+            emit("ROUND \(round) • SELECTION-FALLBACK suppressed ✅ • selection requirement satisfied • selected=\(count.selected)/\(count.maximum) • configured=\(currentPlan.count) • effective-required=\(effectiveRequired) • GO detector/transition requires separate recovery")
+            return false
+        }
+
+        guard let cancelItem = acceptedTextItems.first(where: {
+            let t = normalizedAutomationText($0.text)
+            return t == "取消" || t.contains("取消") || t == "cancel"
+        }) else {
+            let effectiveRequired = min(currentPlan.count, count.maximum)
+            emit("ROUND \(round) • SELECTION-FALLBACK confirmed ⚠️ • selected=\(count.selected)/\(count.maximum) • configured=\(currentPlan.count) • effective-required=\(effectiveRequired), but 取消 was not detected • fallback suppressed")
+            return false
+        }
+
+        let effectiveRequired = min(currentPlan.count, count.maximum)
+        emit("ROUND \(round) • SELECTION-FALLBACK confirmed ✅ • selected=\(count.selected)/\(count.maximum) • configured=\(currentPlan.count) • effective-required=\(effectiveRequired) • " + (busyToastSeen ? "busy-toast=SEEN • " : "busy-toast=not-required • ") + "tap 取消")
+        try await tap(
+            engine: engine,
+            pixel: CGPoint(x: cancelItem.rect.midX, y: cancelItem.rect.midY),
+            image: image,
+            stage: "selection-fallback-cancel",
+            allowBackgroundRenewal: false
+        )
+        await pause(fastMode ? 0.38 : 0.58)
+        try checkCancelled()
+
+        // Reconcile after 取消. If the selection page is still visible, require
+        // selected=0 before switching plans so a fallback can never be mixed with
+        // Pikmin left selected by the previous plan. Otherwise wait briefly for
+        // the cancel transition to finish or re-enter from expedition detail.
+        for reconcile in 1...3 {
+            let afterCancel = try await capture(engine: engine, tag: "selection-fallback-after-cancel")
+            screenshotSink?(afterCancel)
+            let afterText = await FruitDetector.recognizeAllText(image: afterCancel)
+            try checkCancelled()
+
+            if afterText.contains(where: { isSelectionHeaderText($0.text) }) {
+                if let resetCount = parseSelectionCount(from: afterText) {
+                    if resetCount.selected == 0 {
+                        emit("ROUND \(round) • SELECTION-FALLBACK selection reset ✅ • switching to \(nextPlan.type.shortName)×\(nextPlan.count)")
+                        return true
+                    }
+                    emit("ROUND \(round) • SELECTION-FALLBACK cancel settling • selected=\(resetCount.selected)/\(resetCount.maximum) • reconcile=\(reconcile)/3")
+                } else {
+                    emit("ROUND \(round) • SELECTION-FALLBACK selection still visible • waiting for verified zero-count reset • reconcile=\(reconcile)/3")
+                }
+            }
+
+            if let expedition = afterText.first(where: { isExpeditionCTAText($0.text) }) {
+                emit("ROUND \(round) • SELECTION-FALLBACK returned to detail • re-entering 前往探險")
+                try await tap(
+                    engine: engine,
+                    pixel: CGPoint(x: expedition.rect.midX, y: expedition.rect.midY),
+                    image: afterCancel,
+                    stage: "selection-fallback-expedition",
+                    allowBackgroundRenewal: false
+                )
+                await pause(fastMode ? 0.75 : 1.05)
+                guard try await confirmPikminSelectionPage(engine: engine, round: round) else {
+                    emit("ROUND \(round) • SELECTION-FALLBACK re-entry not confirmed ⚠️ • fallback suppressed")
+                    return false
+                }
+                emit("ROUND \(round) • SELECTION-FALLBACK re-entry confirmed ✅ • switching to \(nextPlan.type.shortName)×\(nextPlan.count)")
+                return true
+            }
+
+            if reconcile < 3 {
+                await pause(fastMode ? 0.18 : 0.28)
+            }
+        }
+
+        emit("ROUND \(round) • SELECTION-FALLBACK state not safely reset after 取消 ⚠️ • fallback suppressed")
+        return false
     }
 
     /// 11.5.4.21: after the atomic Runner boundary, transport/lifecycle errors
@@ -1239,7 +1537,7 @@ final class Stage8FullLoopController: ObservableObject {
                 return
             }
 
-            // 11.5.4.32: do not bounce Pilot back to foreground while UIKit is
+            // 11.5.4.33: do not bounce Pilot back to foreground while UIKit is
             // still reporting `.inactive` immediately after AppService foregrounds
             // Pikmin. On affected iPhones, AppService succeeds, our UIBackgroundTask
             // is live, and Pilot remains `.inactive` longer than the short accounting
@@ -1377,7 +1675,7 @@ final class Stage8FullLoopController: ObservableObject {
                    UIApplication.shared.applicationState == .inactive),
                   backgroundTask != .invalid,
                   !backgroundRecoveryPending {
-            // 11.5.4.32: the same provisional transition rule used by the initial
+            // 11.5.4.33: the same provisional transition rule used by the initial
             // post-tail window must also apply between ACK frames and immediately
             // before the bounded X tap. Field logs showed `.inactive` + live task
             // being treated as failure here, which unnecessarily foregrounded
@@ -2087,7 +2385,7 @@ final class Stage8FullLoopController: ObservableObject {
         engine: IDeviceEngine,
         round: Int
     ) async throws {
-        // 11.5.4.32: this checkpoint only needs enough reserve to prepare the
+        // 11.5.4.33: this checkpoint only needs enough reserve to prepare the
         // filter row. The *final* lease is acquired after the filter is already
         // known. Requiring 26s here forced an early Pilot↔Pikmin bounce and then
         // a second one immediately before GO on slower phones.

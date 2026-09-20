@@ -42,6 +42,19 @@ enum PilotPikminType: String, CaseIterable, Identifiable {
     }
 }
 
+
+struct PilotPikminPlan: Equatable, Identifiable {
+    let type: PilotPikminType
+    let count: Int
+
+    var id: String { "\(type.rawValue)-\(count)" }
+
+    init(type: PilotPikminType, count: Int) {
+        self.type = type
+        self.count = min(12, max(type.minimumCount, count))
+    }
+}
+
 enum PilotCargoMode: String, CaseIterable, Identifiable {
     case fruit
     case seedling
